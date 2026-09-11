@@ -10,7 +10,7 @@ func ExampleOpen() {
 	}
 }
 
-func ExampleWorkBook_NumberSheets() {
+func ExampleWorkBook_NumSheets() {
 	if xlFile, err := Open("Table.xls", "utf-8"); err == nil {
 		for i := 0; i < xlFile.NumSheets(); i++ {
 			sheet := xlFile.GetSheet(i)

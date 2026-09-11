@@ -1,0 +1,39 @@
+github.com/Standard-Innovation/xls
+
+This product is a fork of github.com/extrame/xls at tag v0.0.1, upstream
+commit f02a04cbdd7aa643a55358e986ab58959ce2cc11.
+
+The original work is Copyright the extrame/xls authors, written by MinkTech
+(http://www.mink-tech.com) with contributions from Tamas Gulacsi, and is
+licensed under the Apache License, Version 2.0. The LICENSE file in this
+repository is upstream's, unmodified. A copy of the licence is also at
+http://www.apache.org/licenses/LICENSE-2.0.
+
+Modifications in this fork are Copyright 2026 Standard Innovation, and are
+released under the same licence.
+
+As required by section 4(b) of the licence, the files that differ from
+upstream commit f02a04c are listed here.
+
+Modified:
+
+  col.go           XfRk.String consults the cell's number format instead of
+                   rendering every user-formatted RK cell as a timestamp;
+                   RK.number uses an arithmetic shift and honours the fX100
+                   flag on the integer variant.
+  example_test.go  Example renamed to match the method it documents.
+  README.md        Rewritten to describe this fork; upstream's text retained
+                   verbatim under "Upstream README".
+
+Added:
+
+  NOTICE
+  go.mod, go.sum                  Module declaration at the fork's path.
+  numfmt.go                       Number-format classification.
+  col_test.go, numfmt_test.go,
+  numberformat_test.go            Tests for the above.
+  testdata/numberformat.xls       Synthetic fixture; every value in it is
+  testdata/gen_numberformat.py    invented, and its generator is committed
+                                  alongside it.
+
+No upstream file has been removed.
