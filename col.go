@@ -50,13 +50,22 @@ func (xf *XfRk) String(wb *WorkBook) string {
 		fNo := wb.Xfs[idx].formatNo()
 		if fNo >= 164 { // user defined format
 			if fmt := wb.Formats[fNo]; fmt != nil {
+				if !isDateFormat(fmt.str) {
+					return xf.Rk.String()
+				}
 				i, f, isFloat := xf.Rk.number()
 				if !isFloat {
 					f = float64(i)
 				}
 				t := timeFromExcelTime(f, wb.dateMode == 1)
 
-				return t.Format(time.RFC3339) //TODO it should be international and format as the describled style
+				// RFC3339 regardless of the format string, deliberately:
+				// callers read .xls dates in this one shape. Upstream's
+				// master branch renders this path through the format string
+				// instead (goyymmdd), and classifies formats by substring --
+				// which reads plain "0.0" as a date. Do not sync either from
+				// upstream without a caller migration.
+				return t.Format(time.RFC3339)
 			}
 			// see http://www.openoffice.org/sc/excelfileformat.pdf
 		} else if 14 <= fNo && fNo <= 17 || fNo == 22 || 27 <= fNo && fNo <= 36 || 50 <= fNo && fNo <= 58 { // jp. date format
@@ -74,16 +83,26 @@ func (xf *XfRk) String(wb *WorkBook) string {
 type RK uint32
 
 func (rk RK) number() (intNum int64, floatNum float64, isFloat bool) {
-	multiplied := rk & 1
-	isInt := rk & 2
-	val := rk >> 2
-	if isInt == 0 {
-		isFloat = true
-		floatNum = math.Float64frombits(uint64(val) << 34)
-		if multiplied != 0 {
+	multiplied := rk&1 != 0
+	if rk&2 == 0 {
+		// Float variant: the payload is the high 30 bits of an IEEE-754
+		// double whose low 34 bits are zero.
+		floatNum = math.Float64frombits(uint64(rk>>2) << 34)
+		if multiplied {
 			floatNum = floatNum / 100
 		}
-		return
+		return 0, floatNum, true
+	}
+	// Integer variant: the payload is a two's-complement signed 30-bit
+	// integer, so it needs an arithmetic shift. An unsigned shift decodes
+	// every negative value as a large positive one near 2^30.
+	val := int32(rk) >> 2
+	if multiplied {
+		// fX100 applies to the integer variant too, and Excel prefers that
+		// encoding for any value with at most two decimals that fits 30
+		// bits, which covers most two-decimal values. The quotient is not
+		// integral, so it is returned through floatNum.
+		return 0, float64(val) / 100, true
 	}
 	return int64(val), 0, false
 }
