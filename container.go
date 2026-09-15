@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"sync/atomic"
 )
 
 // Compound-file header fields this package has to look at itself. The
@@ -28,50 +29,62 @@ const (
 	cfbSectorShift4096 = 12
 )
 
-// boundDirectorySectorCount presents reader's compound-file header with its
-// directory-sector count clamped to what the container could actually hold,
-// returning reader unchanged whenever the declared count already is.
+// boundedContainerReader reads the container's header exactly once, bounds the
+// directory-sector count in that copy, and returns a reader that hands the
+// container reader the same copy rather than letting it read the header again.
 //
 // The field is a raw uint32 that nothing validates, and the container reader
 // sizes its directory slice from it before reading a single directory sector
-// — so a header declaring 0xFFFFFFFF reserves tens of gigabytes for a file of
-// any size. Clamping cannot change what a file decodes to: the count is used
-// as a capacity hint and nothing else, with the slice grown from the sectors
-// actually walked, so a file whose count is consistent with its own size is
-// handed through byte for byte and every other file decodes exactly as it
-// would have.
+// — so a header declaring 0xFFFFFFFF reserves tens of gigabytes for a
+// container of any size. Bounding it cannot change what a container decodes
+// to: the count is used as a slice capacity and nothing else, with the slice
+// grown from the sectors actually walked, so a header whose count is
+// consistent with its own container is served back byte for byte and every
+// other container decodes exactly as it would have.
 //
 // A major-version-3 container must declare zero here — the format defines no
-// meaning for the field at that version — so it is presented as zero. At
-// version 4 the field does count directory sectors, so it is presented as
-// itself, clamped to the number of sectors in the container. When the
-// container's size is not discoverable the clamp falls back to zero, which
-// costs the reader a preallocation and nothing else.
-func boundDirectorySectorCount(reader io.ReaderAt) io.ReaderAt {
-	var header [cfbHeaderLen]byte
-	if _, err := reader.ReadAt(header[:], 0); err != nil {
-		return reader
+// meaning for the field at that version — so zero is what is served. At
+// version 4 the field does count directory sectors, so it is served as itself,
+// clamped to the number of sectors in the container. When the container's size
+// is not discoverable the clamp falls back to zero, which costs the reader a
+// preallocation and nothing else.
+//
+// Serving one read rather than inspecting the header and stepping aside is
+// what makes the bound hold. Deciding from one read and letting the container
+// reader take another leaves two independent reads that can disagree — a
+// retrying transport, a container still being written, or a reader returning
+// io.EOF alongside a complete read, all of which the io.ReaderAt contract
+// permits — and every disagreement drops the bound silently while reporting
+// success. A header that cannot be read at all is an error here rather than an
+// unbounded read there.
+func boundedContainerReader(reader io.ReaderAt) (io.ReaderAt, error) {
+	header := make([]byte, cfbHeaderLen)
+	// io.ReaderAt may return io.EOF alongside a complete read, so the byte
+	// count decides, not the error.
+	if n, err := reader.ReadAt(header, 0); n < cfbHeaderLen {
+		if err == nil {
+			err = io.ErrUnexpectedEOF
+		}
+		return nil, err
 	}
 
 	declared := binary.LittleEndian.Uint32(header[cfbNumDirectorySectorsOffset : cfbNumDirectorySectorsOffset+4])
-	if declared == 0 {
-		return reader
+	if declared != 0 {
+		var bound uint32
+		if binary.LittleEndian.Uint16(header[cfbMajorVersionOffset:cfbMajorVersionOffset+2]) > cfbMajorVersion3 {
+			bound = containerSectors(reader, header)
+		}
+		if declared > bound {
+			binary.LittleEndian.PutUint32(header[cfbNumDirectorySectorsOffset:cfbNumDirectorySectorsOffset+4], bound)
+		}
 	}
-
-	var bound uint32
-	if binary.LittleEndian.Uint16(header[cfbMajorVersionOffset:cfbMajorVersionOffset+2]) > cfbMajorVersion3 {
-		bound = containerSectors(reader, &header)
-	}
-	if declared <= bound {
-		return reader
-	}
-	return &maskedHeaderReader{reader: reader, value: bound}
+	return &headerServingReader{reader: reader, header: header}, nil
 }
 
 // containerSectors is the number of whole sectors the container holds, which
 // is an upper bound on the number of any one kind of sector in it. It reports
 // zero when either the sector size or the container size is unknown.
-func containerSectors(reader io.ReaderAt, header *[cfbHeaderLen]byte) uint32 {
+func containerSectors(reader io.ReaderAt, header []byte) uint32 {
 	shift := binary.LittleEndian.Uint16(header[cfbSectorShiftOffset : cfbSectorShiftOffset+2])
 	if shift != cfbSectorShift512 && shift != cfbSectorShift4096 {
 		return 0
@@ -106,26 +119,36 @@ func readerAtSize(reader io.ReaderAt) (int64, bool) {
 	return 0, false
 }
 
-// maskedHeaderReader delegates to reader, substituting value for the
-// directory-sector count in whatever bytes it hands back. It deliberately
-// does not implement the container reader's zero-copy slicing interface: a
-// reader that returned its own backing array here could not have the field
-// rewritten, and the copy only applies to headers already found malformed.
-type maskedHeaderReader struct {
+// headerServingReader answers the container reader's first read from offset 0
+// with the header already read and bounded, and delegates everything else
+// untouched.
+//
+// Serving it once, rather than substituting the field on every read that
+// overlaps it, is deliberate. A sector's file offset is computed in unsigned
+// 32-bit arithmetic by the reader underneath and can wrap back to offset 0, so
+// a malformed sector id produces a later read of the header's own bytes. That
+// read is a sector read and must see the container, not the substitution; only
+// the first read from offset 0 is the header.
+//
+// It deliberately does not implement the container reader's zero-copy slicing
+// interface: a reader that returned its own backing array could not be served
+// a bounded header at all.
+type headerServingReader struct {
 	reader io.ReaderAt
-	value  uint32
+	header []byte
+	served atomic.Bool
 }
 
-func (m *maskedHeaderReader) ReadAt(p []byte, off int64) (int, error) {
-	n, err := m.reader.ReadAt(p, off)
-
-	const lo, hi = int64(cfbNumDirectorySectorsOffset), int64(cfbNumDirectorySectorsOffset) + 4
-	if off < hi && off+int64(n) > lo {
-		var field [4]byte
-		binary.LittleEndian.PutUint32(field[:], m.value)
-		for i := max(lo, off); i < min(hi, off+int64(n)); i++ {
-			p[i-off] = field[i-lo]
-		}
+func (h *headerServingReader) ReadAt(p []byte, off int64) (int, error) {
+	if off != 0 || !h.served.CompareAndSwap(false, true) {
+		return h.reader.ReadAt(p, off)
 	}
+	if len(p) <= len(h.header) {
+		return copy(p, h.header), nil
+	}
+	// A first read wider than the header: the container supplies the tail,
+	// the served copy still supplies the header.
+	n, err := h.reader.ReadAt(p, off)
+	copy(p[:min(n, len(h.header))], h.header)
 	return n, err
 }

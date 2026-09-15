@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./...
+
+      # The container layer's bound is a claim about allocation, and its test
+      # asserts on TotalAlloc. Run it under the race detector separately: the
+      # detector changes allocation, so it is a second run rather than a
+      # replacement for the first.
+      - name: test (race)
+        run: go test -race ./...
+
+      - name: gofmt (files this fork owns)
+        run: |
+          unformatted="$(gofmt -l container.go container_test.go xls.go)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed for: $unformatted"
+            exit 1
+          fi

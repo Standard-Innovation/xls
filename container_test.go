@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"io"
 	"os"
 	"runtime"
 	"testing"
@@ -11,8 +12,8 @@ import (
 
 // containerFixture reads the committed compound-file fixture so a test can
 // patch one header or directory field in a copy of it. Every shape a test
-// here needs is a one-field edit away from a file that reads normally, which
-// keeps the difference under test to that one field.
+// here needs is a one-field edit away from a container that reads normally,
+// which keeps the difference under test to that one field.
 func containerFixture(t *testing.T) []byte {
 	t.Helper()
 	b, err := os.ReadFile("testdata/numberformat.xls")
@@ -24,6 +25,42 @@ func containerFixture(t *testing.T) []byte {
 	}
 	return b
 }
+
+// maxDirectorySectorCount returns the fixture with its directory-sector count
+// set to the largest uint32 — the value that sizes a ~34 GB slice in the
+// container reader if it reaches it.
+func maxDirectorySectorCount(t *testing.T) []byte {
+	t.Helper()
+	b := bytes.Clone(containerFixture(t))
+	binary.LittleEndian.PutUint32(b[cfbNumDirectorySectorsOffset:cfbNumDirectorySectorsOffset+4], ^uint32(0))
+	return b
+}
+
+// openAllocation is the number of bytes allocated across one OpenReader call.
+// TotalAlloc is cumulative, so a collection landing between the two readings
+// cannot flatter the result.
+func openAllocation(t *testing.T, reader io.ReaderAt) (*WorkBook, uint64, error) {
+	t.Helper()
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	wb, err := OpenReader(reader, "utf-8")
+	runtime.ReadMemStats(&after)
+	return wb, after.TotalAlloc - before.TotalAlloc, err
+}
+
+// allocationSlack is what one open may exceed another by before the
+// difference is a bound failing rather than noise. Observed difference
+// between a clean open and a maxed-out one, with the bound working: under a
+// kilobyte, against a ~70 KB open.
+//
+// The ceiling is deliberately derived from the container's own clean open
+// rather than written down as an absolute. An absolute has to be picked
+// above every *other* allocation the reader can be talked into — the DIFAT
+// preallocation alone reaches ~32 MB on a header declaring enough FAT
+// sectors — so a flat "32 MB" ceiling would sit just above a reachable
+// figure and pass on a bound that had stopped working.
+const allocationSlack = 1 << 20
 
 // sheetShape renders a workbook down to a value the test can compare without
 // naming what is in it.
@@ -41,85 +78,156 @@ func sheetShape(t *testing.T, wb *WorkBook) []int {
 	return shape
 }
 
-// TestOpenReader_DeclaredDirectorySectorCountDoesNotSizeAnAllocation pins the
-// clamp in boundDirectorySectorCount. The container reader underneath sizes
-// its directory slice straight from the header's directory-sector count
-// before reading any directory sector, so a header declaring the maximum
-// uint32 reserves ~34 GB for a file of a few KB. The field is unvalidated
-// there and, at major version 3, the format requires it to be zero and gives
-// it no meaning — so the file must still read, and read identically, while
-// the allocation stays proportionate to the container.
-//
-// The bound is asserted on TotalAlloc, which is cumulative and so cannot be
-// flattered by a collection landing between the two readings.
-func TestOpenReader_DeclaredDirectorySectorCountDoesNotSizeAnAllocation(t *testing.T) {
-	const allocBound = 32 << 20
-
-	clean := containerFixture(t)
-	patched := bytes.Clone(clean)
-	binary.LittleEndian.PutUint32(patched[cfbNumDirectorySectorsOffset:cfbNumDirectorySectorsOffset+4], ^uint32(0))
-
-	var before, after runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&before)
-	wb, err := OpenReader(bytes.NewReader(patched), "utf-8")
-	runtime.ReadMemStats(&after)
-	if err != nil {
-		t.Fatalf("OpenReader on a container declaring the maximum directory-sector count: %v", err)
+func requireSameShape(t *testing.T, got, want *WorkBook) {
+	t.Helper()
+	g, w := sheetShape(t, got), sheetShape(t, want)
+	if len(g) != len(w) {
+		t.Fatalf("got %d sheets, want %d", len(g), len(w))
 	}
-
-	if grew := after.TotalAlloc - before.TotalAlloc; grew > allocBound {
-		t.Errorf("open allocated %d bytes, want at most %d: the declared directory-sector count is sizing an allocation", grew, allocBound)
-	}
-
-	reference, err := OpenReader(bytes.NewReader(clean), "utf-8")
-	if err != nil {
-		t.Fatalf("OpenReader on the unpatched container: %v", err)
-	}
-	got, want := sheetShape(t, wb), sheetShape(t, reference)
-	if len(got) != len(want) {
-		t.Fatalf("patched container yielded %d sheets, unpatched yielded %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("sheet %d: patched container yielded max row %d, unpatched yielded %d", i, got[i], want[i])
+	for i := range w {
+		if g[i] != w[i] {
+			t.Errorf("sheet %d: got max row %d, want %d", i, g[i], w[i])
 		}
 	}
 }
 
-// TestOpenReader_UnreachableWorkbookEntry_ReturnsError covers a container
-// whose workbook directory entry is present but linked into nothing: the root
-// storage's child pointer is NOSTREAM, so a reader that walks the directory
-// tree — rather than scanning the sector's fixed-size slots linearly — never
-// reaches the entry. OpenReader has to say so, because a nil workbook and a
-// nil error would be indistinguishable from success at every call site.
-func TestOpenReader_UnreachableWorkbookEntry_ReturnsError(t *testing.T) {
-	const (
-		directorySectorLocOffset = 48
-		rootChildIDOffset        = 76
-		noStream                 = 0xFFFFFFFF
-	)
-
-	patched := containerFixture(t)
-	sectorSize := int64(1) << binary.LittleEndian.Uint16(patched[cfbSectorShiftOffset:cfbSectorShiftOffset+2])
-	directorySector := int64(binary.LittleEndian.Uint32(patched[directorySectorLocOffset : directorySectorLocOffset+4]))
-	rootChild := (directorySector+1)*sectorSize + rootChildIDOffset
-	if rootChild+4 > int64(len(patched)) {
-		t.Fatalf("container fixture has no directory sector at index %d", directorySector)
+// TestOpenReader_DeclaredDirectorySectorCountDoesNotSizeAnAllocation pins the
+// bound in boundedContainerReader. The container reader underneath sizes its
+// directory slice straight from the header's directory-sector count before
+// reading any directory sector, so a header declaring the maximum uint32
+// reserves ~34 GB for a container of a few KB. The field is unvalidated there
+// and, at major version 3, the format requires it to be zero and gives it no
+// meaning — so the container must still read, and read identically, while the
+// allocation stays proportionate.
+func TestOpenReader_DeclaredDirectorySectorCountDoesNotSizeAnAllocation(t *testing.T) {
+	clean := containerFixture(t)
+	reference, referenceAlloc, err := openAllocation(t, bytes.NewReader(clean))
+	if err != nil {
+		t.Fatalf("OpenReader on the unpatched container: %v", err)
 	}
-	binary.LittleEndian.PutUint32(patched[rootChild:rootChild+4], noStream)
 
-	wb, err := OpenReader(bytes.NewReader(patched), "utf-8")
-	if !errors.Is(err, ErrNoWorkbookStream) {
-		t.Fatalf("OpenReader error = %v, want %v", err, ErrNoWorkbookStream)
+	wb, alloc, err := openAllocation(t, bytes.NewReader(maxDirectorySectorCount(t)))
+	if err != nil {
+		t.Fatalf("OpenReader on a container declaring the maximum directory-sector count: %v", err)
+	}
+	if alloc > referenceAlloc+allocationSlack {
+		t.Errorf("open allocated %d bytes against %d for the same container unpatched: the declared directory-sector count is sizing an allocation", alloc, referenceAlloc)
+	}
+	requireSameShape(t, wb, reference)
+}
+
+// flakyReaderAt fails its first ReadAt and delegates every one after it — the
+// shape a retrying transport, a range reader over object storage, or a
+// container still being written presents.
+type flakyReaderAt struct {
+	reader io.ReaderAt
+	failed bool
+}
+
+func (f *flakyReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if !f.failed {
+		f.failed = true
+		return 0, errors.New("transient read failure")
+	}
+	return f.reader.ReadAt(p, off)
+}
+
+// TestOpenReader_UnreadableHeader_DoesNotOpenUnbounded is the test for the
+// way a bound like this fails in practice: not by rejecting something it
+// should have accepted, but by quietly not applying.
+//
+// Deciding the bound from one read of the header and letting the container
+// reader take its own leaves two independent reads that can disagree. When
+// the first fails and the second succeeds — permitted for any io.ReaderAt,
+// and ordinary for a retrying transport — the bound is skipped, the container
+// reader sees the raw field, and the open reports success while allocating
+// ~34 GB. Nothing in the return values says the mitigation was absent.
+//
+// Reading the header once and serving that copy removes the disagreement.
+// A header that cannot be read is an error rather than an unbounded read.
+func TestOpenReader_UnreadableHeader_DoesNotOpenUnbounded(t *testing.T) {
+	_, referenceAlloc, err := openAllocation(t, bytes.NewReader(containerFixture(t)))
+	if err != nil {
+		t.Fatalf("OpenReader on the unpatched container: %v", err)
+	}
+
+	flaky := &flakyReaderAt{reader: bytes.NewReader(maxDirectorySectorCount(t))}
+	wb, alloc, err := openAllocation(t, flaky)
+	if alloc > referenceAlloc+allocationSlack {
+		t.Errorf("open allocated %d bytes against %d for the same container read cleanly: a failed header read dropped the bound", alloc, referenceAlloc)
+	}
+	if err == nil {
+		t.Errorf("OpenReader returned no error for a container whose header could not be read")
 	}
 	if wb != nil {
 		t.Errorf("OpenReader returned a workbook alongside its error")
 	}
 }
 
+// eofReaderAt returns io.EOF alongside a complete read of the header, which
+// io.ReaderAt explicitly permits ("ReadAt may return either err == EOF or
+// err == nil" when it reads exactly len(p) bytes at end of input).
+type eofReaderAt struct{ reader io.ReaderAt }
+
+func (e *eofReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	n, err := e.reader.ReadAt(p, off)
+	if off == 0 && n == len(p) {
+		return n, io.EOF
+	}
+	return n, err
+}
+
+// TestOpenReader_HeaderReadReportingEOF_IsStillBounded covers the second way
+// two reads of the same header disagree: a legal (n == len(p), io.EOF) for
+// the header and a clean read for everything else. The byte count decides, so
+// the container reads normally and the bound still applies.
+func TestOpenReader_HeaderReadReportingEOF_IsStillBounded(t *testing.T) {
+	reference, referenceAlloc, err := openAllocation(t, bytes.NewReader(containerFixture(t)))
+	if err != nil {
+		t.Fatalf("OpenReader on the unpatched container: %v", err)
+	}
+
+	wb, alloc, err := openAllocation(t, &eofReaderAt{reader: bytes.NewReader(maxDirectorySectorCount(t))})
+	if err != nil {
+		t.Fatalf("OpenReader on a container whose header read reports io.EOF: %v", err)
+	}
+	if alloc > referenceAlloc+allocationSlack {
+		t.Errorf("open allocated %d bytes against %d for the same container read cleanly: io.EOF alongside a complete read dropped the bound", alloc, referenceAlloc)
+	}
+	requireSameShape(t, wb, reference)
+}
+
+// TestHeaderServingReader_ServesTheBoundedHeaderOnlyOnce pins which read gets
+// the substituted bytes. A sector's file offset is computed in unsigned
+// 32-bit arithmetic by the reader underneath and wraps, so a malformed sector
+// id produces a later read of the header's own bytes — and that read is a
+// sector read, which must see the container rather than the substitution.
+func TestHeaderServingReader_ServesTheBoundedHeaderOnlyOnce(t *testing.T) {
+	raw := maxDirectorySectorCount(t)
+	bounded, err := boundedContainerReader(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("boundedContainerReader: %v", err)
+	}
+
+	read := func() uint32 {
+		t.Helper()
+		buf := make([]byte, cfbHeaderLen)
+		if _, err := bounded.ReadAt(buf, 0); err != nil {
+			t.Fatalf("read from offset 0: %v", err)
+		}
+		return binary.LittleEndian.Uint32(buf[cfbNumDirectorySectorsOffset : cfbNumDirectorySectorsOffset+4])
+	}
+
+	if got := read(); got != 0 {
+		t.Errorf("first read from offset 0 presented %d, want the bounded 0", got)
+	}
+	if got := read(); got != ^uint32(0) {
+		t.Errorf("second read from offset 0 presented %d, want the container's own %d", got, ^uint32(0))
+	}
+}
+
 // synthHeader is a bare compound-file header — enough for
-// boundDirectorySectorCount, which reads nothing else — inside a container of
+// boundedContainerReader, which reads nothing else — inside a container of
 // the given total size.
 func synthHeader(t *testing.T, majorVersion, sectorShift uint16, declared uint32, totalSize int) []byte {
 	t.Helper()
@@ -133,30 +241,12 @@ func synthHeader(t *testing.T, majorVersion, sectorShift uint16, declared uint32
 	return b
 }
 
-// presentedDirectorySectorCount is the directory-sector count a reader sees
-// through boundDirectorySectorCount, read back through a request that starts
-// mid-field so the overlap arithmetic is exercised rather than assumed.
-func presentedDirectorySectorCount(t *testing.T, reader interface {
-	ReadAt([]byte, int64) (int, error)
-}) uint32 {
-	t.Helper()
-	var field [4]byte
-	if _, err := reader.ReadAt(field[:2], cfbNumDirectorySectorsOffset); err != nil {
-		t.Fatalf("read first half of the directory-sector count: %v", err)
-	}
-	if _, err := reader.ReadAt(field[2:], cfbNumDirectorySectorsOffset+2); err != nil {
-		t.Fatalf("read second half of the directory-sector count: %v", err)
-	}
-	return binary.LittleEndian.Uint32(field[:])
-}
-
-// TestBoundDirectorySectorCount_PresentsABoundedField pins what each version
-// of the format is given. Version 3 must declare zero and the field means
-// nothing there, so it is presented as zero however it was written. Version 4
-// does count directory sectors, so a count the container could hold is passed
-// through untouched and a larger one is cut to the sector count of the
-// container itself.
-func TestBoundDirectorySectorCount_PresentsABoundedField(t *testing.T) {
+// TestBoundedContainerReader_ServesABoundedField pins what each version of
+// the format is given. Version 3 must declare zero and the field means
+// nothing there, so zero is served however it was written. Version 4 does
+// count directory sectors, so a count the container could hold is served
+// untouched and a larger one is cut to the sector count of the container.
+func TestBoundedContainerReader_ServesABoundedField(t *testing.T) {
 	const (
 		v3           = 3
 		v4           = 4
@@ -181,13 +271,52 @@ func TestBoundDirectorySectorCount_PresentsABoundedField(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := synthHeader(t, tc.majorVersion, tc.sectorShift, tc.declared, tc.totalSize)
-			got := presentedDirectorySectorCount(t, boundDirectorySectorCount(bytes.NewReader(b)))
+			bounded, err := boundedContainerReader(bytes.NewReader(b))
+			if err != nil {
+				t.Fatalf("boundedContainerReader: %v", err)
+			}
+			buf := make([]byte, cfbHeaderLen)
+			if _, err := bounded.ReadAt(buf, 0); err != nil {
+				t.Fatalf("read the served header: %v", err)
+			}
+			got := binary.LittleEndian.Uint32(buf[cfbNumDirectorySectorsOffset : cfbNumDirectorySectorsOffset+4])
 			if got != tc.want {
-				t.Errorf("presented directory-sector count = %d, want %d", got, tc.want)
+				t.Errorf("served directory-sector count = %d, want %d", got, tc.want)
 			}
 			if binary.LittleEndian.Uint32(b[cfbNumDirectorySectorsOffset:cfbNumDirectorySectorsOffset+4]) != tc.declared {
 				t.Errorf("the underlying container was rewritten; it must be left alone")
 			}
 		})
+	}
+}
+
+// TestOpenReader_UnreachableWorkbookEntry_ReturnsError covers a container
+// whose workbook directory entry is present but linked into nothing: the root
+// storage's child pointer is NOSTREAM, so a reader that walks the directory
+// tree — rather than scanning the sector's fixed-size slots linearly — never
+// reaches the entry. OpenReader has to say so, because a nil workbook and a
+// nil error would be indistinguishable from success at every call site.
+func TestOpenReader_UnreachableWorkbookEntry_ReturnsError(t *testing.T) {
+	const (
+		directorySectorLocOffset = 48
+		rootChildIDOffset        = 76
+		noStream                 = 0xFFFFFFFF
+	)
+
+	patched := bytes.Clone(containerFixture(t))
+	sectorSize := int64(1) << binary.LittleEndian.Uint16(patched[cfbSectorShiftOffset:cfbSectorShiftOffset+2])
+	directorySector := int64(binary.LittleEndian.Uint32(patched[directorySectorLocOffset : directorySectorLocOffset+4]))
+	rootChild := (directorySector+1)*sectorSize + rootChildIDOffset
+	if rootChild+4 > int64(len(patched)) {
+		t.Fatalf("container fixture has no directory sector at index %d", directorySector)
+	}
+	binary.LittleEndian.PutUint32(patched[rootChild:rootChild+4], noStream)
+
+	wb, err := OpenReader(bytes.NewReader(patched), "utf-8")
+	if !errors.Is(err, ErrNoWorkbookStream) {
+		t.Fatalf("OpenReader error = %v, want %v", err, ErrNoWorkbookStream)
+	}
+	if wb != nil {
+		t.Errorf("OpenReader returned a workbook alongside its error")
 	}
 }
