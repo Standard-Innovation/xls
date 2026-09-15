@@ -589,31 +589,6 @@ func TestOpenContainer_Panic_ReturnsNilAndAnError(t *testing.T) {
 	}
 }
 
-// TestOpenReader_HeaderNamingASectorThatWraps_ReturnsError covers a header
-// sector pointer whose file offset, computed in the reader's own 32-bit
-// arithmetic, wraps back inside the container's header.
-//
-// This is not only a malformed-input case. It is the one input shape that can
-// make a genuine sector read land at offset 0, where the bounded header is
-// being served — so rejecting it is what keeps the substitution from ever
-// reaching a sector read through a header-declared pointer.
-func TestOpenReader_HeaderNamingASectorThatWraps_ReturnsError(t *testing.T) {
-	const directorySectorLocOffset = 48
-	// (8388607+1) * 512 is exactly 2^32, so the reader's offset for it is 0.
-	const wrapsToTheHeader = 8388607
-
-	patched := bytes.Clone(containerFixture(t))
-	binary.LittleEndian.PutUint32(patched[directorySectorLocOffset:directorySectorLocOffset+4], wrapsToTheHeader)
-
-	wb, err := OpenReader(bytes.NewReader(patched), "utf-8")
-	if !errors.Is(err, ErrSectorOffsetOverflow) {
-		t.Fatalf("OpenReader error = %v, want %v", err, ErrSectorOffsetOverflow)
-	}
-	if wb != nil {
-		t.Errorf("OpenReader returned a workbook alongside its error")
-	}
-}
-
 // TestOpenReader_BIFF5StreamName_IsRead covers the "Book" stream name.
 //
 // The corpus this change was measured against is BIFF8 throughout, so nothing
@@ -655,61 +630,4 @@ func TestOpenReader_BIFF5StreamName_IsRead(t *testing.T) {
 		t.Fatalf("OpenReader on the unrenamed container: %v", err)
 	}
 	requireSameShape(t, wb, reference)
-}
-
-// TestOpenReader_FreeSectInAnUnfollowedPointer_StillReads is the
-// false-positive pin for ErrSectorOffsetOverflow, and it is here because the
-// first version of that check failed it.
-//
-// Two of the three sector pointers in the header are read only when a
-// companion count is non-zero. A writer that pads an unused one with FREESECT
-// leaves a value that looks like a wildly out-of-range sector and is never
-// dereferenced — the same padding convention this package exists to
-// accommodate in a DIFAT sector's terminator word, one field over. Rejecting
-// it would be a regression dressed as hardening, so each pointer is checked
-// only under the condition that makes the reader follow it.
-func TestOpenReader_FreeSectInAnUnfollowedPointer_StillReads(t *testing.T) {
-	const (
-		freeSect                = 0xFFFFFFFF
-		miniFatSectorLocOffset  = 60
-		numMiniFatSectorsOffset = 64
-		difatSectorLocOffset    = 68
-		numDifatSectorsOffset   = 72
-	)
-
-	reference, err := OpenReader(bytes.NewReader(containerFixture(t)), "utf-8")
-	if err != nil {
-		t.Fatalf("OpenReader on the unpatched container: %v", err)
-	}
-
-	for _, tc := range []struct {
-		name     string
-		pointers []int
-	}{
-		{"mini-FAT pointer", []int{miniFatSectorLocOffset}},
-		{"DIFAT pointer", []int{difatSectorLocOffset}},
-		{"both", []int{miniFatSectorLocOffset, difatSectorLocOffset}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			patched := bytes.Clone(containerFixture(t))
-			for _, offset := range tc.pointers {
-				binary.LittleEndian.PutUint32(patched[offset:offset+4], freeSect)
-			}
-			// The counts that would make those pointers followed stay at the
-			// zero the container really declares; that is what makes the
-			// padding inert.
-			if got := binary.LittleEndian.Uint32(patched[numMiniFatSectorsOffset : numMiniFatSectorsOffset+4]); got != 0 {
-				t.Fatalf("fixture declares %d mini-FAT sectors, want 0 for this shape", got)
-			}
-			if got := binary.LittleEndian.Uint32(patched[numDifatSectorsOffset : numDifatSectorsOffset+4]); got != 0 {
-				t.Fatalf("fixture declares %d DIFAT sectors, want 0 for this shape", got)
-			}
-
-			wb, err := OpenReader(bytes.NewReader(patched), "utf-8")
-			if err != nil {
-				t.Fatalf("OpenReader on a container with FREESECT padding in an unfollowed pointer: %v", err)
-			}
-			requireSameShape(t, wb, reference)
-		})
-	}
 }

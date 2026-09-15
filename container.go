@@ -21,16 +21,9 @@ const (
 	cfbSectorShiftOffset = 30
 	// cfbNumDirectorySectorsOffset holds the count of directory sectors.
 	cfbNumDirectorySectorsOffset = 40
-	// cfbDirectorySectorLocOffset, cfbMiniFatSectorLocOffset and
-	// cfbDifatSectorLocOffset hold the first sector of the directory stream,
-	// the mini FAT and the DIFAT chain respectively.
+	// cfbDirectorySectorLocOffset holds the first sector of the directory
+	// stream.
 	cfbDirectorySectorLocOffset = 48
-	cfbMiniFatSectorLocOffset   = 60
-	cfbDifatSectorLocOffset     = 68
-	// cfbNumMiniFatSectorsOffset and cfbNumDifatSectorsOffset hold the counts
-	// that decide whether the two pointers above are followed at all.
-	cfbNumMiniFatSectorsOffset = 64
-	cfbNumDifatSectorsOffset   = 72
 
 	cfbMajorVersion3 = 3
 	// cfbSectorShift512 and cfbSectorShift4096 are the only two sector
@@ -58,27 +51,6 @@ var ErrShortHeader = errors.New("xls: input is shorter than a compound file head
 // error, and cannot reject anything that reads: a container with no directory
 // has nowhere to keep a workbook stream.
 var ErrNoDirectory = errors.New("xls: compound file header declares no directory stream")
-
-// ErrSectorOffsetOverflow reports a header naming a sector whose file offset
-// does not fit the addressing the format uses for it.
-//
-// The container reader computes a sector's offset as (sector + 1) * sectorSize
-// in unsigned 32-bit arithmetic, which wraps. A wrapped offset is not the
-// sector the header designates — it is whatever happens to sit at the
-// wrapped-to position, the container's own header among the possibilities — so
-// a container the reader actually follows to one cannot be read correctly,
-// only accidentally.
-//
-// "Actually follows" is the whole of it, and an earlier version of this check
-// got it wrong by ignoring the qualifier. Two of the three sector pointers the
-// header carries are read only when a companion count is non-zero, and a
-// writer that pads an unused pointer with FREESECT — the same convention this
-// package exists to accommodate one field over — produces a value that looks
-// like an out-of-range sector while never being dereferenced. Checking it
-// unconditionally rejected containers that read perfectly well. Each pointer
-// is therefore checked only under the condition that makes the reader follow
-// it.
-var ErrSectorOffsetOverflow = errors.New("xls: compound file header names a sector outside the container's addressing")
 
 // boundedContainerReader reads the container's header exactly once, bounds the
 // directory-sector count in that copy, and returns a reader that hands the
@@ -122,9 +94,6 @@ func boundedContainerReader(reader io.ReaderAt) (io.ReaderAt, error) {
 	if binary.LittleEndian.Uint32(header[cfbDirectorySectorLocOffset:cfbDirectorySectorLocOffset+4]) == cfbEndOfChain {
 		return nil, ErrNoDirectory
 	}
-	if err := checkSectorOffsets(header); err != nil {
-		return nil, err
-	}
 
 	declared := binary.LittleEndian.Uint32(header[cfbNumDirectorySectorsOffset : cfbNumDirectorySectorsOffset+4])
 	if declared != 0 {
@@ -137,53 +106,6 @@ func boundedContainerReader(reader io.ReaderAt) (io.ReaderAt, error) {
 		}
 	}
 	return &headerServingReader{reader: reader, header: header}, nil
-}
-
-// checkSectorOffsets rejects a header whose sector pointers resolve, under the
-// container reader's own 32-bit offset arithmetic, to somewhere other than the
-// sector they name — but only the pointers that reader will actually follow.
-//
-// The directory pointer is always followed: the walk is `for sn != endOfChain`
-// and the end-of-chain case is refused before this runs. The mini-FAT and
-// DIFAT pointers are followed only when their counts are non-zero; with a
-// zero count the reader returns before reading them, so whatever is in them
-// is inert and must stay that way.
-//
-// Only the three pointers the header itself carries are checkable here. A
-// sector id read out of a chain word inside a sector is not visible until the
-// reader is already following it.
-func checkSectorOffsets(header []byte) error {
-	shift := binary.LittleEndian.Uint16(header[cfbSectorShiftOffset : cfbSectorShiftOffset+2])
-	if shift != cfbSectorShift512 && shift != cfbSectorShift4096 {
-		// Not a sector size the reader accepts; its own rejection is the
-		// better error, and the arithmetic below would be meaningless.
-		return nil
-	}
-	sectorSize := uint64(1) << shift
-
-	count := func(offset int) uint32 {
-		return binary.LittleEndian.Uint32(header[offset : offset+4])
-	}
-	for _, pointer := range []struct {
-		offset   int
-		followed bool
-	}{
-		{cfbDirectorySectorLocOffset, true},
-		{cfbMiniFatSectorLocOffset, count(cfbNumMiniFatSectorsOffset) != 0},
-		{cfbDifatSectorLocOffset, count(cfbNumDifatSectorsOffset) != 0},
-	} {
-		if !pointer.followed {
-			continue
-		}
-		sector := binary.LittleEndian.Uint32(header[pointer.offset : pointer.offset+4])
-		if sector == cfbEndOfChain {
-			continue
-		}
-		if (uint64(sector)+1)*sectorSize > math.MaxUint32 {
-			return ErrSectorOffsetOverflow
-		}
-	}
-	return nil
 }
 
 // containerSectors is the number of whole sectors the container holds, which
