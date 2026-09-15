@@ -7,6 +7,11 @@ on:
     # one ref that must not be able to ship untested.
     tags: ['v*']
   pull_request:
+  # This module is dormant between fixes by design, so push and pull_request
+  # give the drift job below zero runs in exactly the interval it exists to
+  # watch: the one where a dependency moves and nothing here does.
+  schedule:
+    - cron: '17 4 * * 1'
 
 permissions:
   contents: read
@@ -77,5 +82,16 @@ jobs:
           go get github.com/richardlehane/mscfb@latest
           go list -m github.com/richardlehane/mscfb
 
+      # `go test -run` on a pattern that matches nothing prints
+      # "[no tests to run]" and exits 0, so naming the test is not enough:
+      # renaming or deleting it would disable this alarm silently, which is the
+      # same class of failure the alarm exists to catch. Assert it is there
+      # first.
       - name: access pattern still holds
-        run: go test -count=1 -run TestContainerReaderReadsTheWholeHeaderFirst ./...
+        run: |
+          test_name=TestContainerReaderReadsTheWholeHeaderFirst
+          if ! go test -list "^${test_name}$" ./... | grep -qx "$test_name"; then
+            echo "$test_name is not present; the drift alarm has nothing to run" >&2
+            exit 1
+          fi
+          go test -count=1 -run "^${test_name}$" ./...
