@@ -15,7 +15,7 @@ import (
 // exist but are not linked into its directory tree reaches this.
 var ErrNoWorkbookStream = errors.New("xls: compound file holds no workbook stream")
 
-// Open one xls file
+//Open one xls file
 func Open(file string) (*WorkBook, error) {
 	if fi, err := os.Open(file); err == nil {
 		return OpenReader(fi)

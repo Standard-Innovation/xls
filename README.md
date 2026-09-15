@@ -79,8 +79,8 @@ covering it properly means a per-locale code table, so it is left open.
 - The BIFF5 FORMAT record has a one-byte length, which `Head.Size uint16`
   misreads.
 - The tree predates modern gofmt comment spacing and is left as upstream had it
-  so the fix stays reviewable against `v0.0.1`. CI's gofmt check is scoped to
-  the files this fork adds, for the same reason.
+  so the fix stays reviewable against `v0.0.1`. CI's gofmt check therefore
+  covers only the files this fork adds, and not the inherited ones it edits.
 
 ## Do not sync `XfRk.String` from upstream
 
