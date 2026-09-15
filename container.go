@@ -21,9 +21,12 @@ const (
 	cfbSectorShiftOffset = 30
 	// cfbNumDirectorySectorsOffset holds the count of directory sectors.
 	cfbNumDirectorySectorsOffset = 40
-	// cfbDirectorySectorLocOffset holds the first sector of the directory
-	// stream.
+	// cfbDirectorySectorLocOffset, cfbMiniFatSectorLocOffset and
+	// cfbDifatSectorLocOffset hold the first sector of the directory stream,
+	// the mini FAT and the DIFAT chain respectively.
 	cfbDirectorySectorLocOffset = 48
+	cfbMiniFatSectorLocOffset   = 60
+	cfbDifatSectorLocOffset     = 68
 
 	cfbMajorVersion3 = 3
 	// cfbSectorShift512 and cfbSectorShift4096 are the only two sector
@@ -51,6 +54,18 @@ var ErrShortHeader = errors.New("xls: input is shorter than a compound file head
 // error, and cannot reject anything that reads: a container with no directory
 // has nowhere to keep a workbook stream.
 var ErrNoDirectory = errors.New("xls: compound file header declares no directory stream")
+
+// ErrSectorOffsetOverflow reports a header naming a sector whose file offset
+// does not fit the addressing the format uses for it.
+//
+// The container reader computes a sector's offset as (sector + 1) * sectorSize
+// in unsigned 32-bit arithmetic, which wraps. A wrapped offset is not the
+// sector the header designates — it is whatever happens to sit at the
+// wrapped-to position, the container's own header among the possibilities — so
+// a container reaching one cannot be read correctly, only accidentally.
+// Rejecting it costs nothing that reads and keeps a sector read from landing
+// back inside the header.
+var ErrSectorOffsetOverflow = errors.New("xls: compound file header names a sector outside the container's addressing")
 
 // boundedContainerReader reads the container's header exactly once, bounds the
 // directory-sector count in that copy, and returns a reader that hands the
@@ -94,6 +109,9 @@ func boundedContainerReader(reader io.ReaderAt) (io.ReaderAt, error) {
 	if binary.LittleEndian.Uint32(header[cfbDirectorySectorLocOffset:cfbDirectorySectorLocOffset+4]) == cfbEndOfChain {
 		return nil, ErrNoDirectory
 	}
+	if err := checkSectorOffsets(header); err != nil {
+		return nil, err
+	}
 
 	declared := binary.LittleEndian.Uint32(header[cfbNumDirectorySectorsOffset : cfbNumDirectorySectorsOffset+4])
 	if declared != 0 {
@@ -106,6 +124,32 @@ func boundedContainerReader(reader io.ReaderAt) (io.ReaderAt, error) {
 		}
 	}
 	return &headerServingReader{reader: reader, header: header}, nil
+}
+
+// checkSectorOffsets rejects a header whose declared sector pointers resolve,
+// under the container reader's own 32-bit offset arithmetic, to somewhere
+// other than the sector they name. Only the three pointers the header itself
+// carries are checkable here; a sector id read out of a chain word inside a
+// sector is not visible until the reader is already following it.
+func checkSectorOffsets(header []byte) error {
+	shift := binary.LittleEndian.Uint16(header[cfbSectorShiftOffset : cfbSectorShiftOffset+2])
+	if shift != cfbSectorShift512 && shift != cfbSectorShift4096 {
+		// Not a sector size the reader accepts; its own rejection is the
+		// better error, and the arithmetic below would be meaningless.
+		return nil
+	}
+	sectorSize := uint64(1) << shift
+
+	for _, offset := range []int{cfbDirectorySectorLocOffset, cfbMiniFatSectorLocOffset, cfbDifatSectorLocOffset} {
+		sector := binary.LittleEndian.Uint32(header[offset : offset+4])
+		if sector == cfbEndOfChain {
+			continue
+		}
+		if (uint64(sector)+1)*sectorSize > math.MaxUint32 {
+			return ErrSectorOffsetOverflow
+		}
+	}
+	return nil
 }
 
 // containerSectors is the number of whole sectors the container holds, which
@@ -156,12 +200,13 @@ func readerAtSize(reader io.ReaderAt) (int64, bool) {
 // bytes; once any sector has been read, the reader is past its header and gets
 // the container verbatim.
 //
-// Within that phase the answer is idempotent, not one-shot. io.ReaderAt
-// documents parallel use as supported and places no constraint on how many
-// reads a client makes or how long they are, so a one-shot answer hands the
-// bounded copy to one caller and the raw field to every other — failing in the
-// direction that drops the bound. Serving every header read costs nothing and
-// fails the other way.
+// Within that phase every read that touches the header is answered from the
+// copy, at any offset inside it and any length, and the answer is idempotent
+// rather than one-shot. io.ReaderAt documents parallel use as supported and
+// places no constraint on how many reads a client makes, where they start or
+// how long they are, so a one-shot answer hands the bounded copy to one caller
+// and the raw field to every other — failing in the direction that drops the
+// bound. Serving them all costs nothing and fails the other way.
 //
 // It deliberately does not implement the container reader's zero-copy slicing
 // interface: a reader that returned its own backing array could not be served
@@ -173,19 +218,20 @@ type headerServingReader struct {
 }
 
 func (h *headerServingReader) ReadAt(p []byte, off int64) (int, error) {
-	if off >= int64(len(h.header)) {
+	headerLen := int64(len(h.header))
+	if off >= headerLen {
 		h.pastHeader.Store(true)
 		return h.reader.ReadAt(p, off)
 	}
-	if off != 0 || h.pastHeader.Load() {
+	if off < 0 || h.pastHeader.Load() {
 		return h.reader.ReadAt(p, off)
 	}
-	if len(p) <= len(h.header) {
-		return copy(p, h.header), nil
+	if off+int64(len(p)) <= headerLen {
+		return copy(p, h.header[off:]), nil
 	}
-	// A read wider than the header: the container supplies the tail, the
-	// served copy still supplies the header.
+	// A read running past the header: the container supplies the tail, the
+	// served copy still supplies the part inside the header.
 	n, err := h.reader.ReadAt(p, off)
-	copy(p[:min(n, len(h.header))], h.header)
+	copy(p[:min(int64(n), headerLen-off)], h.header[off:])
 	return n, err
 }

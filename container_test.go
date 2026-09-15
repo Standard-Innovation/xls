@@ -63,8 +63,9 @@ func openAllocation(t *testing.T, reader io.ReaderAt) (*WorkBook, uint64, error)
 // larger than it looks: the DIFAT preallocation reaches 32,515,992 B on a
 // 512-byte-sector header declaring enough FAT sectors, and 261,896,136 B
 // (249.76 MiB) once the same header also declares 4096-byte sectors, which
-// quadruples the per-sector DIFAT entry count. Any flat ceiling in that range
-// would pass on a bound that had stopped working.
+// takes the per-sector DIFAT entry count from 127 to 1023 — eight times, not
+// four. Any flat ceiling in that range would pass on a bound that had stopped
+// working.
 const allocationSlack = 1 << 20
 
 // sheetShape renders a workbook down to a value the test can compare without
@@ -240,9 +241,41 @@ func TestHeaderServingReader_ServesEveryHeaderReadUntilTheReaderMovesOn(t *testi
 	if _, err := bounded.ReadAt(nil, 0); err != nil {
 		t.Fatalf("zero-length read from offset 0: %v", err)
 	}
-	short := make([]byte, 8)
-	if _, err := bounded.ReadAt(short, 0); err != nil {
+
+	// A read short enough to stop before the field, and one that reaches it:
+	// both are header reads and both must come from the copy. Asserting only
+	// that they do not error would pass on a reader that delegated them raw.
+	if _, err := bounded.ReadAt(make([]byte, 8), 0); err != nil {
 		t.Fatalf("short read from offset 0: %v", err)
+	}
+	shortOverField := make([]byte, cfbNumDirectorySectorsOffset+4)
+	if _, err := bounded.ReadAt(shortOverField, 0); err != nil {
+		t.Fatalf("short read covering the field: %v", err)
+	}
+	if got := binary.LittleEndian.Uint32(shortOverField[cfbNumDirectorySectorsOffset:]); got != 0 {
+		t.Errorf("a %d-byte read from offset 0 presented %d, want the bounded 0", len(shortOverField), got)
+	}
+
+	// A read starting inside the header rather than at its start.
+	midField := make([]byte, 4)
+	if _, err := bounded.ReadAt(midField, cfbNumDirectorySectorsOffset); err != nil {
+		t.Fatalf("read of the field alone: %v", err)
+	}
+	if got := binary.LittleEndian.Uint32(midField); got != 0 {
+		t.Errorf("a read of the field alone presented %d, want the bounded 0", got)
+	}
+
+	// A read running past the end of the header: the container supplies the
+	// tail, the copy still supplies the part inside the header.
+	straddle := make([]byte, cfbHeaderLen+16)
+	if _, err := bounded.ReadAt(straddle, 0); err != nil {
+		t.Fatalf("read running past the header: %v", err)
+	}
+	if got := binary.LittleEndian.Uint32(straddle[cfbNumDirectorySectorsOffset:]); got != 0 {
+		t.Errorf("a read running past the header presented %d for the field, want the bounded 0", got)
+	}
+	if !bytes.Equal(straddle[cfbHeaderLen:], raw[cfbHeaderLen:cfbHeaderLen+16]) {
+		t.Errorf("a read running past the header did not return the container's own bytes beyond it")
 	}
 	for i := 0; i < 3; i++ {
 		if got := readHeader(); got != 0 {
@@ -506,4 +539,120 @@ func TestContainerReaderReadsTheWholeHeaderFirst(t *testing.T) {
 			t.Errorf("read %d was %d bytes at offset %d, inside the header: only the first read may be", i+1, read[1], read[0])
 		}
 	}
+}
+
+// panicAfterHeaderReaderAt delegates the header and then panics, standing in
+// for a container reader that indexes something it did not check.
+type panicAfterHeaderReaderAt struct {
+	reader io.ReaderAt
+	reads  int
+}
+
+func (p *panicAfterHeaderReaderAt) ReadAt(b []byte, off int64) (int, error) {
+	p.reads++
+	if p.reads > 1 {
+		panic("read past the header")
+	}
+	return p.reader.ReadAt(b, off)
+}
+
+// TestOpenReader_PanicWhileOpeningTheContainer_BecomesAnError pins the
+// conversion of a panic into a read failure.
+//
+// Two ways this can rot, and both must fail here. Removing the recover takes
+// the calling process down, which is what the recover exists to stop.
+// Recovering but returning a nil error is worse than either: the caller gets
+// no container and no error, and the next call made on the nil container
+// panics somewhere no recover covers at all.
+func TestOpenReader_PanicWhileOpeningTheContainer_BecomesAnError(t *testing.T) {
+	reader := &panicAfterHeaderReaderAt{reader: bytes.NewReader(containerFixture(t))}
+
+	wb, err := OpenReader(reader, "utf-8")
+	if err == nil {
+		t.Fatalf("OpenReader returned no error for a container reader that panicked")
+	}
+	if wb != nil {
+		t.Errorf("OpenReader returned a workbook alongside its error")
+	}
+}
+
+// TestOpenContainer_Panic_ReturnsNilAndAnError pins the same two properties on
+// the returned pair directly, so a recover that produced a nil container with
+// a nil error cannot pass by being caught later.
+func TestOpenContainer_Panic_ReturnsNilAndAnError(t *testing.T) {
+	doc, err := openContainer(&panicAfterHeaderReaderAt{reader: bytes.NewReader(containerFixture(t))})
+	if err == nil {
+		t.Fatalf("openContainer returned a nil error after a panic")
+	}
+	if doc != nil {
+		t.Errorf("openContainer returned a container alongside its error")
+	}
+}
+
+// TestOpenReader_HeaderNamingASectorThatWraps_ReturnsError covers a header
+// sector pointer whose file offset, computed in the reader's own 32-bit
+// arithmetic, wraps back inside the container's header.
+//
+// This is not only a malformed-input case. It is the one input shape that can
+// make a genuine sector read land at offset 0, where the bounded header is
+// being served — so rejecting it is what keeps the substitution from ever
+// reaching a sector read through a header-declared pointer.
+func TestOpenReader_HeaderNamingASectorThatWraps_ReturnsError(t *testing.T) {
+	const directorySectorLocOffset = 48
+	// (8388607+1) * 512 is exactly 2^32, so the reader's offset for it is 0.
+	const wrapsToTheHeader = 8388607
+
+	patched := bytes.Clone(containerFixture(t))
+	binary.LittleEndian.PutUint32(patched[directorySectorLocOffset:directorySectorLocOffset+4], wrapsToTheHeader)
+
+	wb, err := OpenReader(bytes.NewReader(patched), "utf-8")
+	if !errors.Is(err, ErrSectorOffsetOverflow) {
+		t.Fatalf("OpenReader error = %v, want %v", err, ErrSectorOffsetOverflow)
+	}
+	if wb != nil {
+		t.Errorf("OpenReader returned a workbook alongside its error")
+	}
+}
+
+// TestOpenReader_BIFF5StreamName_IsRead covers the "Book" stream name.
+//
+// The corpus this change was measured against is BIFF8 throughout, so nothing
+// else here exercises the other arm — and an untested arm in a published
+// reader is a claim of support rather than support. The fixture is the BIFF8
+// one with its stream renamed: the container and the record stream are
+// identical, so what is under test is the name match alone.
+func TestOpenReader_BIFF5StreamName_IsRead(t *testing.T) {
+	const (
+		directorySectorLocOffset = 48
+		dirEntrySize             = 128
+		nameLengthOffset         = 64
+		workbookEntry            = 1
+	)
+
+	patched := bytes.Clone(containerFixture(t))
+	sectorSize := int64(1) << binary.LittleEndian.Uint16(patched[cfbSectorShiftOffset:cfbSectorShiftOffset+2])
+	directorySector := int64(binary.LittleEndian.Uint32(patched[directorySectorLocOffset : directorySectorLocOffset+4]))
+	entry := (directorySector+1)*sectorSize + workbookEntry*dirEntrySize
+	if entry+dirEntrySize > int64(len(patched)) {
+		t.Fatalf("container fixture has no directory entry at index %d", workbookEntry)
+	}
+
+	name := "Book"
+	for i := range make([]byte, nameLengthOffset) {
+		patched[entry+int64(i)] = 0
+	}
+	for i, r := range name {
+		binary.LittleEndian.PutUint16(patched[entry+int64(i)*2:], uint16(r))
+	}
+	binary.LittleEndian.PutUint16(patched[entry+nameLengthOffset:], uint16((len(name)+1)*2))
+
+	wb, err := OpenReader(bytes.NewReader(patched), "utf-8")
+	if err != nil {
+		t.Fatalf("OpenReader on a container whose stream is named %q: %v", name, err)
+	}
+	reference, err := OpenReader(bytes.NewReader(containerFixture(t)), "utf-8")
+	if err != nil {
+		t.Fatalf("OpenReader on the unrenamed container: %v", err)
+	}
+	requireSameShape(t, wb, reference)
 }
