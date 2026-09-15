@@ -27,8 +27,8 @@ type WorkBook struct {
 	dateMode       uint16
 }
 
-//read workbook from ole2 file
-func newWorkBookFromOle2(rs io.ReadSeeker) *WorkBook {
+//read workbook from the compound file's workbook stream
+func newWorkBookFromStream(rs io.ReadSeeker) *WorkBook {
 	wb := new(WorkBook)
 	wb.Formats = make(map[uint16]*Format)
 	// wb.bts = bts
