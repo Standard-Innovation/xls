@@ -32,7 +32,7 @@ func TestNumberFormatFixture(t *testing.T) {
 		{"rk_int_date", "2024-01-15T00:00:00Z"},
 	}
 
-	wb, err := Open("testdata/numberformat.xls", "utf-8")
+	wb, err := Open("testdata/numberformat.xls")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

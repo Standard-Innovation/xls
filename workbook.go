@@ -27,8 +27,8 @@ type WorkBook struct {
 	dateMode       uint16
 }
 
-//read workbook from ole2 file
-func newWorkBookFromOle2(rs io.ReadSeeker) *WorkBook {
+//read workbook from the compound file's workbook stream
+func newWorkBookFromStream(rs io.ReadSeeker) *WorkBook {
 	wb := new(WorkBook)
 	wb.Formats = make(map[uint16]*Format)
 	// wb.bts = bts
@@ -240,7 +240,20 @@ func (w *WorkBook) addSheet(sheet *boundsheet, buf io.ReadSeeker) {
 
 //reading a sheet from the compress file to memory, you should call this before you try to get anything from sheet
 func (w *WorkBook) prepareSheet(sheet *WorkSheet) {
-	w.rs.Seek(int64(sheet.bs.Filepos), 0)
+	if _, err := w.rs.Seek(int64(sheet.bs.Filepos), 0); err != nil {
+		// The position this sheet declares is not inside the workbook stream.
+		// The failed seek leaves the stream offset where it already was, so
+		// parsing on would build the sheet out of whatever bytes happen to
+		// follow the last thing read — in a multi-sheet workbook, another
+		// sheet's records — and return them as this sheet's content, with no
+		// error reported anywhere. An empty sheet is the only answer the file
+		// supports, and it is what this reader produced before the container
+		// layer underneath began reporting an out-of-range seek instead of
+		// clamping it to end-of-stream.
+		sheet.rows = make(map[uint16]*Row)
+		sheet.parsed = true
+		return
+	}
 	sheet.parse(w.rs)
 }
 

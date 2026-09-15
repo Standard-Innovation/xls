@@ -1,0 +1,100 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    # Tags are built too: a tag is what every consumer resolves, so it is the
+    # one ref that must not be able to ship untested.
+    tags: ['v*']
+  pull_request:
+  # This module is dormant between fixes by design, so push and pull_request
+  # give the drift job below zero runs in exactly the interval it exists to
+  # watch: the one where a dependency moves and nothing here does.
+  schedule:
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./...
+
+      # The container layer's bound is a claim about allocation, and its test
+      # asserts on TotalAlloc. Run it under the race detector separately: the
+      # detector changes allocation, so it is a second run rather than a
+      # replacement for the first.
+      - name: test (race)
+        run: go test -race ./...
+
+      # Only the files this fork adds are listed below. README's
+      # "Known issues inherited from upstream" records that the tree keeps
+      # upstream's comment spacing so this fork stays reviewable against
+      # v0.0.1. Reformatting an inherited file's comments would bury the
+      # changes this fork actually makes to it, and that holds however much
+      # of the file changes — so workbook.go and xls.go are both out, even
+      # though this fork rewrites most of xls.go's body.
+      - name: gofmt (files this fork owns)
+        run: |
+          unformatted="$(gofmt -l container.go container_test.go workbook_test.go)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed for: $unformatted"
+            exit 1
+          fi
+
+  # The bound in container.go holds only while the container reader asks for
+  # its whole header in one read from offset 0. This module requires that
+  # reader directly, so the job above can only ever test the version go.mod
+  # names — but the version that decides whether the bound applies is the one
+  # MVS picks in a consumer's graph, where another dependency pins an older
+  # release. Go does not compile a dependency's test files, so no consumer's
+  # own suite runs this assertion either.
+  #
+  # This job closes that gap from the only side available: resolve the reader
+  # forward and re-run the access-pattern test against it. It fails the build
+  # rather than warning, because the failure mode it guards is a bound that
+  # stops applying while every read still reports success. It is also what
+  # will say when the upstream allocation fixes land.
+  drift-latest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: resolve the container reader forward
+        run: |
+          go get github.com/richardlehane/mscfb@latest
+          go list -m github.com/richardlehane/mscfb
+
+      # `go test -run` on a pattern that matches nothing prints
+      # "[no tests to run]" and exits 0, so naming the test is not enough:
+      # renaming or deleting it would disable this alarm silently, which is the
+      # same class of failure the alarm exists to catch. Assert it is there
+      # first.
+      - name: access pattern still holds
+        run: |
+          test_name=TestContainerReaderReadsTheWholeHeaderFirst
+          if ! go test -list "^${test_name}$" ./... | grep -qx "$test_name"; then
+            echo "$test_name is not present; the drift alarm has nothing to run" >&2
+            exit 1
+          fi
+          go test -count=1 -run "^${test_name}$" ./...
