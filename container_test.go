@@ -47,7 +47,7 @@ func openAllocation(t *testing.T, reader io.ReaderAt) (*WorkBook, uint64, error)
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	wb, err := OpenReader(reader, "utf-8")
+	wb, err := OpenReader(reader)
 	runtime.ReadMemStats(&after)
 	return wb, after.TotalAlloc - before.TotalAlloc, err
 }
@@ -419,7 +419,7 @@ func TestOpenReader_UnreachableWorkbookEntry_ReturnsError(t *testing.T) {
 	}
 	binary.LittleEndian.PutUint32(patched[rootChild:rootChild+4], noStream)
 
-	wb, err := OpenReader(bytes.NewReader(patched), "utf-8")
+	wb, err := OpenReader(bytes.NewReader(patched))
 	if !errors.Is(err, ErrNoWorkbookStream) {
 		t.Fatalf("OpenReader error = %v, want %v", err, ErrNoWorkbookStream)
 	}
@@ -443,7 +443,7 @@ func TestOpenReader_HeaderDeclaringNoDirectory_ReturnsError(t *testing.T) {
 	patched := bytes.Clone(containerFixture(t))
 	binary.LittleEndian.PutUint32(patched[directorySectorLocOffset:directorySectorLocOffset+4], cfbEndOfChain)
 
-	wb, err := OpenReader(bytes.NewReader(patched), "utf-8")
+	wb, err := OpenReader(bytes.NewReader(patched))
 	if !errors.Is(err, ErrNoDirectory) {
 		t.Fatalf("OpenReader error = %v, want %v", err, ErrNoDirectory)
 	}
@@ -457,7 +457,7 @@ func TestOpenReader_HeaderDeclaringNoDirectory_ReturnsError(t *testing.T) {
 // caller retrying on io.EOF, which is the idiom for a truncated read from a
 // transport, must not retry a file that will never be long enough.
 func TestOpenReader_ShortInput_ReportsAPermanentError(t *testing.T) {
-	wb, err := OpenReader(bytes.NewReader([]byte("not a container")), "utf-8")
+	wb, err := OpenReader(bytes.NewReader([]byte("not a container")))
 	if !errors.Is(err, ErrShortHeader) {
 		t.Fatalf("OpenReader error = %v, want %v", err, ErrShortHeader)
 	}
@@ -567,7 +567,7 @@ func (p *panicAfterHeaderReaderAt) ReadAt(b []byte, off int64) (int, error) {
 func TestOpenReader_PanicWhileOpeningTheContainer_BecomesAnError(t *testing.T) {
 	reader := &panicAfterHeaderReaderAt{reader: bytes.NewReader(containerFixture(t))}
 
-	wb, err := OpenReader(reader, "utf-8")
+	wb, err := OpenReader(reader)
 	if err == nil {
 		t.Fatalf("OpenReader returned no error for a container reader that panicked")
 	}
@@ -621,11 +621,11 @@ func TestOpenReader_BIFF5StreamName_IsRead(t *testing.T) {
 	}
 	binary.LittleEndian.PutUint16(patched[entry+nameLengthOffset:], uint16((len(name)+1)*2))
 
-	wb, err := OpenReader(bytes.NewReader(patched), "utf-8")
+	wb, err := OpenReader(bytes.NewReader(patched))
 	if err != nil {
 		t.Fatalf("OpenReader on a container whose stream is named %q: %v", name, err)
 	}
-	reference, err := OpenReader(bytes.NewReader(containerFixture(t)), "utf-8")
+	reference, err := OpenReader(bytes.NewReader(containerFixture(t)))
 	if err != nil {
 		t.Fatalf("OpenReader on the unrenamed container: %v", err)
 	}

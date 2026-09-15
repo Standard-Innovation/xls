@@ -16,16 +16,23 @@ import (
 var ErrNoWorkbookStream = errors.New("xls: compound file holds no workbook stream")
 
 // Open one xls file
-func Open(file string, charset string) (*WorkBook, error) {
+func Open(file string) (*WorkBook, error) {
 	if fi, err := os.Open(file); err == nil {
-		return OpenReader(fi, charset)
+		return OpenReader(fi)
 	} else {
 		return nil, err
 	}
 }
 
-// Open xls file from reader
-func OpenReader(reader io.ReaderAt, charset string) (*WorkBook, error) {
+// OpenReader reads a workbook from a compound file.
+//
+// The charset parameter both of these used to take is gone. It was never read:
+// the container layer it was handed to ignored it, and the BIFF layer carries
+// its own encoding logic, so it had been inert since before this fork. It
+// survived earlier revisions of this change on the grounds that dropping a
+// parameter breaks published callers for nothing — an argument that stops
+// applying in the one release where the signature is already breaking.
+func OpenReader(reader io.ReaderAt) (*WorkBook, error) {
 	bounded, err := boundedContainerReader(reader)
 	if err != nil {
 		return nil, err

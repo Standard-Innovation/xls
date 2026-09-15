@@ -5,13 +5,13 @@ import (
 )
 
 func ExampleOpen() {
-	if xlFile, err := Open("Table.xls", "utf-8"); err == nil {
+	if xlFile, err := Open("Table.xls"); err == nil {
 		fmt.Println(xlFile.Author)
 	}
 }
 
 func ExampleWorkBook_NumSheets() {
-	if xlFile, err := Open("Table.xls", "utf-8"); err == nil {
+	if xlFile, err := Open("Table.xls"); err == nil {
 		for i := 0; i < xlFile.NumSheets(); i++ {
 			sheet := xlFile.GetSheet(i)
 			fmt.Println(sheet.Name)
@@ -21,7 +21,7 @@ func ExampleWorkBook_NumSheets() {
 
 //Output: read the content of first two cols in each row
 func ExampleWorkBook_GetSheet() {
-	if xlFile, err := Open("Table.xls", "utf-8"); err == nil {
+	if xlFile, err := Open("Table.xls"); err == nil {
 		if sheet1 := xlFile.GetSheet(0); sheet1 != nil {
 			fmt.Print("Total Lines ", sheet1.MaxRow, sheet1.Name)
 			col1 := sheet1.Row(0).Col(0)
