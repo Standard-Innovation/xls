@@ -38,10 +38,44 @@ jobs:
       - name: test (race)
         run: go test -race ./...
 
+      # workbook.go is deliberately absent from the list below: README's
+      # "Known defects kept" records that the tree is left with upstream's
+      # comment spacing so this fork stays reviewable against v0.0.1, and
+      # workbook.go's only change here is a two-line rename.
       - name: gofmt (files this fork owns)
         run: |
-          unformatted="$(gofmt -l container.go container_test.go xls.go workbook.go)"
+          unformatted="$(gofmt -l container.go container_test.go xls.go)"
           if [ -n "$unformatted" ]; then
             echo "gofmt needed for: $unformatted"
             exit 1
           fi
+
+  # The bound in container.go holds only while the container reader asks for
+  # its whole header in one read from offset 0. This module requires that
+  # reader directly, so the job above can only ever test the version go.mod
+  # names — but the version that decides whether the bound applies is the one
+  # MVS picks in a consumer's graph, where another dependency pins an older
+  # release. Go does not compile a dependency's test files, so no consumer's
+  # own suite runs this assertion either.
+  #
+  # This job closes that gap from the only side available: resolve the reader
+  # forward and re-run the access-pattern test against it. It fails the build
+  # rather than warning, because the failure mode it guards is a bound that
+  # stops applying while every read still reports success. It is also what
+  # will say when the upstream allocation fixes land.
+  drift-latest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: resolve the container reader forward
+        run: |
+          go get github.com/richardlehane/mscfb@latest
+          go list -m github.com/richardlehane/mscfb
+
+      - name: access pattern still holds
+        run: go test -count=1 -run TestContainerReaderReadsTheWholeHeaderFirst ./...

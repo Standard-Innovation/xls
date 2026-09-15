@@ -70,12 +70,17 @@ covering it properly means a per-locale code table, so it is left open.
 
 - `worksheet.go` prints record-reading errors to stdout with `fmt.Println`.
 - `addFormat` calls `os.Exit(1)` when the format map is nil.
-- `extrame/ole2`'s DIFAT walk does not terminate on a FREESECT terminator, so
-  some containers allocate without bound. Callers guard this today.
+- The compound-file reader sizes two slices from header counts nothing
+  validates, so a few KB of input can reserve roughly 250 MB. Both are bounded
+  by that reader's own limit, both are reported upstream, and neither can be
+  clamped here without trading a bounded allocation for a silently truncated
+  read. `container.go` clamps the one field where a clamp provably changes no
+  decode.
 - The BIFF5 FORMAT record has a one-byte length, which `Head.Size uint16`
   misreads.
 - The tree predates modern gofmt comment spacing and is left as upstream had it
-  so the fix stays reviewable against `v0.0.1`.
+  so the fix stays reviewable against `v0.0.1`. CI's gofmt check is scoped to
+  the files this fork adds, for the same reason.
 
 ## Do not sync `XfRk.String` from upstream
 

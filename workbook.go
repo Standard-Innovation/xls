@@ -8,7 +8,7 @@ import (
 	"unicode/utf16"
 )
 
-// xls workbook type
+//xls workbook type
 type WorkBook struct {
 	Is5ver   bool
 	Type     uint16
@@ -27,7 +27,7 @@ type WorkBook struct {
 	dateMode       uint16
 }
 
-// read workbook from the compound file's workbook stream
+//read workbook from the compound file's workbook stream
 func newWorkBookFromStream(rs io.ReadSeeker) *WorkBook {
 	wb := new(WorkBook)
 	wb.Formats = make(map[uint16]*Format)
@@ -238,7 +238,7 @@ func (w *WorkBook) addSheet(sheet *boundsheet, buf io.ReadSeeker) {
 	w.sheets = append(w.sheets, &WorkSheet{bs: sheet, Name: name, wb: w})
 }
 
-// reading a sheet from the compress file to memory, you should call this before you try to get anything from sheet
+//reading a sheet from the compress file to memory, you should call this before you try to get anything from sheet
 func (w *WorkBook) prepareSheet(sheet *WorkSheet) {
 	if _, err := w.rs.Seek(int64(sheet.bs.Filepos), 0); err != nil {
 		// The position this sheet declares is not inside the workbook stream.
@@ -257,7 +257,7 @@ func (w *WorkBook) prepareSheet(sheet *WorkSheet) {
 	sheet.parse(w.rs)
 }
 
-// Get one sheet by its number
+//Get one sheet by its number
 func (w *WorkBook) GetSheet(num int) *WorkSheet {
 	if num < len(w.sheets) {
 		s := w.sheets[num]
@@ -270,14 +270,14 @@ func (w *WorkBook) GetSheet(num int) *WorkSheet {
 	}
 }
 
-// Get the number of all sheets, look into example
+//Get the number of all sheets, look into example
 func (w *WorkBook) NumSheets() int {
 	return len(w.sheets)
 }
 
-// helper function to read all cells from file
-// Notice: the max value is the limit of the max capacity of lines.
-// Warning: the helper function will need big memeory if file is large.
+//helper function to read all cells from file
+//Notice: the max value is the limit of the max capacity of lines.
+//Warning: the helper function will need big memeory if file is large.
 func (w *WorkBook) ReadAllCells(max int) (res [][]string) {
 	res = make([][]string, 0)
 	for _, sheet := range w.sheets {

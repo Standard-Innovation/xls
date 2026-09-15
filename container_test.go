@@ -354,12 +354,11 @@ func synthHeader(t *testing.T, majorVersion, sectorShift uint16, declared uint32
 // count directory sectors, so a count the container could hold is served
 // untouched and a larger one is cut to the sector count of the container.
 func TestBoundedContainerReader_ServesABoundedField(t *testing.T) {
+	// majorVersion4 is the one value here the package itself has no constant
+	// for; everything else comes from container.go rather than being restated.
 	const (
-		v3           = 3
-		v4           = 4
-		shift512     = 9
-		shift4096    = 12
-		threeSectors = 3 * 4096
+		majorVersion4 = cfbMajorVersion3 + 1
+		threeSectors  = 3 * 4096
 	)
 
 	for _, tc := range []struct {
@@ -370,11 +369,11 @@ func TestBoundedContainerReader_ServesABoundedField(t *testing.T) {
 		totalSize    int
 		want         uint32
 	}{
-		{"version 3 declaring the maximum", v3, shift512, ^uint32(0), 8 * 512, 0},
-		{"version 3 declaring a plausible count", v3, shift512, 2, 8 * 512, 0},
-		{"version 4 declaring the maximum", v4, shift4096, ^uint32(0), threeSectors, 3},
-		{"version 4 declaring a count the container holds", v4, shift4096, 2, threeSectors, 2},
-		{"version 4 with an unreadable sector size", v4, 0, ^uint32(0), threeSectors, 0},
+		{"version 3 declaring the maximum", cfbMajorVersion3, cfbSectorShift512, ^uint32(0), 8 * 512, 0},
+		{"version 3 declaring a plausible count", cfbMajorVersion3, cfbSectorShift512, 2, 8 * 512, 0},
+		{"version 4 declaring the maximum", majorVersion4, cfbSectorShift4096, ^uint32(0), threeSectors, 3},
+		{"version 4 declaring a count the container holds", majorVersion4, cfbSectorShift4096, 2, threeSectors, 2},
+		{"version 4 with an unreadable sector size", majorVersion4, 0, ^uint32(0), threeSectors, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := synthHeader(t, tc.majorVersion, tc.sectorShift, tc.declared, tc.totalSize)
@@ -405,14 +404,13 @@ func TestBoundedContainerReader_ServesABoundedField(t *testing.T) {
 // nil error would be indistinguishable from success at every call site.
 func TestOpenReader_UnreachableWorkbookEntry_ReturnsError(t *testing.T) {
 	const (
-		directorySectorLocOffset = 48
-		rootChildIDOffset        = 76
-		noStream                 = 0xFFFFFFFF
+		rootChildIDOffset = 76
+		noStream          = 0xFFFFFFFF
 	)
 
 	patched := bytes.Clone(containerFixture(t))
 	sectorSize := int64(1) << binary.LittleEndian.Uint16(patched[cfbSectorShiftOffset:cfbSectorShiftOffset+2])
-	directorySector := int64(binary.LittleEndian.Uint32(patched[directorySectorLocOffset : directorySectorLocOffset+4]))
+	directorySector := int64(binary.LittleEndian.Uint32(patched[cfbDirectorySectorLocOffset : cfbDirectorySectorLocOffset+4]))
 	rootChild := (directorySector+1)*sectorSize + rootChildIDOffset
 	if rootChild+4 > int64(len(patched)) {
 		t.Fatalf("container fixture has no directory sector at index %d", directorySector)
@@ -438,10 +436,8 @@ func TestOpenReader_UnreachableWorkbookEntry_ReturnsError(t *testing.T) {
 // consumer cannot defend against that from the outside, and this module is
 // what sits between arbitrary bytes and a reader it does not own.
 func TestOpenReader_HeaderDeclaringNoDirectory_ReturnsError(t *testing.T) {
-	const directorySectorLocOffset = 48
-
 	patched := bytes.Clone(containerFixture(t))
-	binary.LittleEndian.PutUint32(patched[directorySectorLocOffset:directorySectorLocOffset+4], cfbEndOfChain)
+	binary.LittleEndian.PutUint32(patched[cfbDirectorySectorLocOffset:cfbDirectorySectorLocOffset+4], cfbEndOfChain)
 
 	wb, err := OpenReader(bytes.NewReader(patched))
 	if !errors.Is(err, ErrNoDirectory) {
@@ -517,11 +513,22 @@ func (r *recordingReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // boundedContainerReader answers reads of the header and delegates the rest,
 // which only bounds anything while the container reader actually asks for its
 // header in one read from offset 0. Nothing in go.mod can express that, and
-// the effective version of the container reader is the maximum across a
-// five-module graph — another consumer of it already pins a different one — so
-// any dependency update anywhere can float it. If the access pattern ever
-// shifts, the bound stops applying while every open still reports success,
-// which is a failure with no symptom. This test is the alarm for it.
+// the effective version is the maximum across a five-module graph — the
+// consumer's other dependency on this reader pins an older one — so a
+// dependency update anywhere can float it. If the pattern ever shifts, the
+// bound stops applying while every open still reports success, which is a
+// failure with no symptom. This test is the alarm for it.
+//
+// The pattern is not a guess. It holds unchanged across v1.0.4, v1.0.6,
+// v1.0.7 and v1.0.8 — every release in the module cache, spanning both
+// behavioural changes between them — which is the evidence the design rests
+// on rather than an argument from how a reader ought to be written.
+//
+// Note what this test cannot do by itself: run against the version the
+// *consumer* resolves. Go does not compile a dependency's test files, and this
+// module requires the reader directly, so here it only ever asserts the
+// version this go.mod names. CI's drift-latest job is the half that covers the
+// consumer's side.
 func TestContainerReaderReadsTheWholeHeaderFirst(t *testing.T) {
 	recorder := &recordingReaderAt{reader: bytes.NewReader(containerFixture(t))}
 	if _, err := mscfb.New(recorder); err != nil {
@@ -598,15 +605,14 @@ func TestOpenContainer_Panic_ReturnsNilAndAnError(t *testing.T) {
 // identical, so what is under test is the name match alone.
 func TestOpenReader_BIFF5StreamName_IsRead(t *testing.T) {
 	const (
-		directorySectorLocOffset = 48
-		dirEntrySize             = 128
-		nameLengthOffset         = 64
-		workbookEntry            = 1
+		dirEntrySize     = 128
+		nameLengthOffset = 64
+		workbookEntry    = 1
 	)
 
 	patched := bytes.Clone(containerFixture(t))
 	sectorSize := int64(1) << binary.LittleEndian.Uint16(patched[cfbSectorShiftOffset:cfbSectorShiftOffset+2])
-	directorySector := int64(binary.LittleEndian.Uint32(patched[directorySectorLocOffset : directorySectorLocOffset+4]))
+	directorySector := int64(binary.LittleEndian.Uint32(patched[cfbDirectorySectorLocOffset : cfbDirectorySectorLocOffset+4]))
 	entry := (directorySector+1)*sectorSize + workbookEntry*dirEntrySize
 	if entry+dirEntrySize > int64(len(patched)) {
 		t.Fatalf("container fixture has no directory entry at index %d", workbookEntry)
