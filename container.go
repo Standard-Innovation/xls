@@ -27,6 +27,10 @@ const (
 	cfbDirectorySectorLocOffset = 48
 	cfbMiniFatSectorLocOffset   = 60
 	cfbDifatSectorLocOffset     = 68
+	// cfbNumMiniFatSectorsOffset and cfbNumDifatSectorsOffset hold the counts
+	// that decide whether the two pointers above are followed at all.
+	cfbNumMiniFatSectorsOffset = 64
+	cfbNumDifatSectorsOffset   = 72
 
 	cfbMajorVersion3 = 3
 	// cfbSectorShift512 and cfbSectorShift4096 are the only two sector
@@ -62,9 +66,18 @@ var ErrNoDirectory = errors.New("xls: compound file header declares no directory
 // in unsigned 32-bit arithmetic, which wraps. A wrapped offset is not the
 // sector the header designates — it is whatever happens to sit at the
 // wrapped-to position, the container's own header among the possibilities — so
-// a container reaching one cannot be read correctly, only accidentally.
-// Rejecting it costs nothing that reads and keeps a sector read from landing
-// back inside the header.
+// a container the reader actually follows to one cannot be read correctly,
+// only accidentally.
+//
+// "Actually follows" is the whole of it, and an earlier version of this check
+// got it wrong by ignoring the qualifier. Two of the three sector pointers the
+// header carries are read only when a companion count is non-zero, and a
+// writer that pads an unused pointer with FREESECT — the same convention this
+// package exists to accommodate one field over — produces a value that looks
+// like an out-of-range sector while never being dereferenced. Checking it
+// unconditionally rejected containers that read perfectly well. Each pointer
+// is therefore checked only under the condition that makes the reader follow
+// it.
 var ErrSectorOffsetOverflow = errors.New("xls: compound file header names a sector outside the container's addressing")
 
 // boundedContainerReader reads the container's header exactly once, bounds the
@@ -126,11 +139,19 @@ func boundedContainerReader(reader io.ReaderAt) (io.ReaderAt, error) {
 	return &headerServingReader{reader: reader, header: header}, nil
 }
 
-// checkSectorOffsets rejects a header whose declared sector pointers resolve,
-// under the container reader's own 32-bit offset arithmetic, to somewhere
-// other than the sector they name. Only the three pointers the header itself
-// carries are checkable here; a sector id read out of a chain word inside a
-// sector is not visible until the reader is already following it.
+// checkSectorOffsets rejects a header whose sector pointers resolve, under the
+// container reader's own 32-bit offset arithmetic, to somewhere other than the
+// sector they name — but only the pointers that reader will actually follow.
+//
+// The directory pointer is always followed: the walk is `for sn != endOfChain`
+// and the end-of-chain case is refused before this runs. The mini-FAT and
+// DIFAT pointers are followed only when their counts are non-zero; with a
+// zero count the reader returns before reading them, so whatever is in them
+// is inert and must stay that way.
+//
+// Only the three pointers the header itself carries are checkable here. A
+// sector id read out of a chain word inside a sector is not visible until the
+// reader is already following it.
 func checkSectorOffsets(header []byte) error {
 	shift := binary.LittleEndian.Uint16(header[cfbSectorShiftOffset : cfbSectorShiftOffset+2])
 	if shift != cfbSectorShift512 && shift != cfbSectorShift4096 {
@@ -140,8 +161,21 @@ func checkSectorOffsets(header []byte) error {
 	}
 	sectorSize := uint64(1) << shift
 
-	for _, offset := range []int{cfbDirectorySectorLocOffset, cfbMiniFatSectorLocOffset, cfbDifatSectorLocOffset} {
-		sector := binary.LittleEndian.Uint32(header[offset : offset+4])
+	count := func(offset int) uint32 {
+		return binary.LittleEndian.Uint32(header[offset : offset+4])
+	}
+	for _, pointer := range []struct {
+		offset   int
+		followed bool
+	}{
+		{cfbDirectorySectorLocOffset, true},
+		{cfbMiniFatSectorLocOffset, count(cfbNumMiniFatSectorsOffset) != 0},
+		{cfbDifatSectorLocOffset, count(cfbNumDifatSectorsOffset) != 0},
+	} {
+		if !pointer.followed {
+			continue
+		}
+		sector := binary.LittleEndian.Uint32(header[pointer.offset : pointer.offset+4])
 		if sector == cfbEndOfChain {
 			continue
 		}
