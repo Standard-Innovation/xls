@@ -7,7 +7,10 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"sync"
 	"testing"
+
+	"github.com/richardlehane/mscfb"
 )
 
 // containerFixture reads the committed compound-file fixture so a test can
@@ -52,14 +55,16 @@ func openAllocation(t *testing.T, reader io.ReaderAt) (*WorkBook, uint64, error)
 // allocationSlack is what one open may exceed another by before the
 // difference is a bound failing rather than noise. Observed difference
 // between a clean open and a maxed-out one, with the bound working: under a
-// kilobyte, against a ~70 KB open.
+// kilobyte, against a ~70 KiB open.
 //
 // The ceiling is deliberately derived from the container's own clean open
-// rather than written down as an absolute. An absolute has to be picked
-// above every *other* allocation the reader can be talked into — the DIFAT
-// preallocation alone reaches ~32 MB on a header declaring enough FAT
-// sectors — so a flat "32 MB" ceiling would sit just above a reachable
-// figure and pass on a bound that had stopped working.
+// rather than written down as an absolute. An absolute has to be picked above
+// every *other* allocation the reader can be talked into, and that figure is
+// larger than it looks: the DIFAT preallocation reaches 32,515,992 B on a
+// 512-byte-sector header declaring enough FAT sectors, and 261,896,136 B
+// (249.76 MiB) once the same header also declares 4096-byte sectors, which
+// quadruples the per-sector DIFAT entry count. Any flat ceiling in that range
+// would pass on a bound that had stopped working.
 const allocationSlack = 1 << 20
 
 // sheetShape renders a workbook down to a value the test can compare without
@@ -116,6 +121,11 @@ func TestOpenReader_DeclaredDirectorySectorCountDoesNotSizeAnAllocation(t *testi
 	requireSameShape(t, wb, reference)
 }
 
+// errTransient is the failure flakyReaderAt injects, named so a test can
+// assert that this error reached the caller rather than merely that some
+// error did.
+var errTransient = errors.New("transient read failure")
+
 // flakyReaderAt fails its first ReadAt and delegates every one after it — the
 // shape a retrying transport, a range reader over object storage, or a
 // container still being written presents.
@@ -127,7 +137,7 @@ type flakyReaderAt struct {
 func (f *flakyReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	if !f.failed {
 		f.failed = true
-		return 0, errors.New("transient read failure")
+		return 0, errTransient
 	}
 	return f.reader.ReadAt(p, off)
 }
@@ -156,8 +166,8 @@ func TestOpenReader_UnreadableHeader_DoesNotOpenUnbounded(t *testing.T) {
 	if alloc > referenceAlloc+allocationSlack {
 		t.Errorf("open allocated %d bytes against %d for the same container read cleanly: a failed header read dropped the bound", alloc, referenceAlloc)
 	}
-	if err == nil {
-		t.Errorf("OpenReader returned no error for a container whose header could not be read")
+	if !errors.Is(err, errTransient) {
+		t.Errorf("OpenReader error = %v, want the transport's own %v — a read failure must reach the caller, not be relabelled", err, errTransient)
 	}
 	if wb != nil {
 		t.Errorf("OpenReader returned a workbook alongside its error")
@@ -197,19 +207,28 @@ func TestOpenReader_HeaderReadReportingEOF_IsStillBounded(t *testing.T) {
 	requireSameShape(t, wb, reference)
 }
 
-// TestHeaderServingReader_ServesTheBoundedHeaderOnlyOnce pins which read gets
-// the substituted bytes. A sector's file offset is computed in unsigned
-// 32-bit arithmetic by the reader underneath and wraps, so a malformed sector
-// id produces a later read of the header's own bytes — and that read is a
-// sector read, which must see the container rather than the substitution.
-func TestHeaderServingReader_ServesTheBoundedHeaderOnlyOnce(t *testing.T) {
+// TestHeaderServingReader_ServesEveryHeaderReadUntilTheReaderMovesOn pins
+// which reads get the substituted bytes.
+//
+// Every read of the header does, however many there are and whatever their
+// length: io.ReaderAt places no constraint on either, and documents parallel
+// use as supported, so answering only the first would hand the bounded copy to
+// one caller and the raw field to all the others. A zero-length read must not
+// consume the answer either.
+//
+// Reads stop being substituted once a sector has been read. A sector's file
+// offset is computed in unsigned 32-bit arithmetic by the reader underneath
+// and wraps, so a malformed sector id produces a read of the header's own
+// bytes — by then the reader is past its header, and that read is a sector
+// read which must see the container.
+func TestHeaderServingReader_ServesEveryHeaderReadUntilTheReaderMovesOn(t *testing.T) {
 	raw := maxDirectorySectorCount(t)
 	bounded, err := boundedContainerReader(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("boundedContainerReader: %v", err)
 	}
 
-	read := func() uint32 {
+	readHeader := func() uint32 {
 		t.Helper()
 		buf := make([]byte, cfbHeaderLen)
 		if _, err := bounded.ReadAt(buf, 0); err != nil {
@@ -218,11 +237,66 @@ func TestHeaderServingReader_ServesTheBoundedHeaderOnlyOnce(t *testing.T) {
 		return binary.LittleEndian.Uint32(buf[cfbNumDirectorySectorsOffset : cfbNumDirectorySectorsOffset+4])
 	}
 
-	if got := read(); got != 0 {
-		t.Errorf("first read from offset 0 presented %d, want the bounded 0", got)
+	if _, err := bounded.ReadAt(nil, 0); err != nil {
+		t.Fatalf("zero-length read from offset 0: %v", err)
 	}
-	if got := read(); got != ^uint32(0) {
-		t.Errorf("second read from offset 0 presented %d, want the container's own %d", got, ^uint32(0))
+	short := make([]byte, 8)
+	if _, err := bounded.ReadAt(short, 0); err != nil {
+		t.Fatalf("short read from offset 0: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if got := readHeader(); got != 0 {
+			t.Errorf("header read %d presented %d, want the bounded 0", i, got)
+		}
+	}
+
+	// A sector read: from here the reader is past its header.
+	if _, err := bounded.ReadAt(make([]byte, cfbHeaderLen), cfbHeaderLen); err != nil {
+		t.Fatalf("sector read: %v", err)
+	}
+	if got := readHeader(); got != ^uint32(0) {
+		t.Errorf("read from offset 0 after a sector read presented %d, want the container's own %d", got, ^uint32(0))
+	}
+}
+
+// TestHeaderServingReader_ConcurrentHeaderReadsAllSeeTheBound covers the same
+// idempotence under the parallel use io.ReaderAt documents. A race detector
+// cannot see this failing: handing one caller the bounded copy and the rest
+// the raw field is not a data race, just the wrong answer.
+func TestHeaderServingReader_ConcurrentHeaderReadsAllSeeTheBound(t *testing.T) {
+	const readers = 32
+
+	bounded, err := boundedContainerReader(bytes.NewReader(maxDirectorySectorCount(t)))
+	if err != nil {
+		t.Fatalf("boundedContainerReader: %v", err)
+	}
+
+	got := make([]uint32, readers)
+	var start, done sync.WaitGroup
+	start.Add(1)
+	done.Add(readers)
+	for i := range got {
+		go func() {
+			defer done.Done()
+			start.Wait()
+			buf := make([]byte, cfbHeaderLen)
+			if _, err := bounded.ReadAt(buf, 0); err != nil {
+				return
+			}
+			got[i] = binary.LittleEndian.Uint32(buf[cfbNumDirectorySectorsOffset : cfbNumDirectorySectorsOffset+4])
+		}()
+	}
+	start.Done()
+	done.Wait()
+
+	unbounded := 0
+	for _, v := range got {
+		if v != 0 {
+			unbounded++
+		}
+	}
+	if unbounded != 0 {
+		t.Errorf("%d of %d concurrent header reads saw the container's raw field instead of the bound", unbounded, readers)
 	}
 }
 
@@ -318,5 +392,118 @@ func TestOpenReader_UnreachableWorkbookEntry_ReturnsError(t *testing.T) {
 	}
 	if wb != nil {
 		t.Errorf("OpenReader returned a workbook alongside its error")
+	}
+}
+
+// TestOpenReader_HeaderDeclaringNoDirectory_ReturnsError covers a header whose
+// directory stream begins at the end-of-chain sentinel — a four-byte edit to
+// an otherwise valid container.
+//
+// The container reader builds its directory entries by walking that chain and
+// then indexes the first entry unconditionally, so an empty walk leaves it
+// indexing an empty slice: the read does not fail, the process does. A
+// consumer cannot defend against that from the outside, and this module is
+// what sits between arbitrary bytes and a reader it does not own.
+func TestOpenReader_HeaderDeclaringNoDirectory_ReturnsError(t *testing.T) {
+	const directorySectorLocOffset = 48
+
+	patched := bytes.Clone(containerFixture(t))
+	binary.LittleEndian.PutUint32(patched[directorySectorLocOffset:directorySectorLocOffset+4], cfbEndOfChain)
+
+	wb, err := OpenReader(bytes.NewReader(patched), "utf-8")
+	if !errors.Is(err, ErrNoDirectory) {
+		t.Fatalf("OpenReader error = %v, want %v", err, ErrNoDirectory)
+	}
+	if wb != nil {
+		t.Errorf("OpenReader returned a workbook alongside its error")
+	}
+}
+
+// TestOpenReader_ShortInput_ReportsAPermanentError covers input too small to
+// hold a header. The distinction that matters is not that it fails but how: a
+// caller retrying on io.EOF, which is the idiom for a truncated read from a
+// transport, must not retry a file that will never be long enough.
+func TestOpenReader_ShortInput_ReportsAPermanentError(t *testing.T) {
+	wb, err := OpenReader(bytes.NewReader([]byte("not a container")), "utf-8")
+	if !errors.Is(err, ErrShortHeader) {
+		t.Fatalf("OpenReader error = %v, want %v", err, ErrShortHeader)
+	}
+	if errors.Is(err, io.EOF) {
+		t.Errorf("OpenReader error unwraps to io.EOF, which invites a caller to retry input that can never succeed")
+	}
+	if wb != nil {
+		t.Errorf("OpenReader returned a workbook alongside its error")
+	}
+}
+
+// failingIterator yields entries until it has none left to give and then
+// fails, standing in for a container reader that cannot produce an entry it
+// believes exists.
+type failingIterator struct{ err error }
+
+func (f *failingIterator) Next() (*mscfb.File, error) { return nil, f.err }
+
+// TestWorkbookStream_IterationError_IsNotReportedAsAMissingStream pins the
+// difference between the two ways the directory walk can end. io.EOF means the
+// container held no workbook stream; anything else means the reader failed,
+// and collapsing the two would report a read failure as a verdict about the
+// container's contents.
+func TestWorkbookStream_IterationError_IsNotReportedAsAMissingStream(t *testing.T) {
+	want := errors.New("directory entry read failed")
+
+	stream, err := workbookStream(&failingIterator{err: want})
+	if !errors.Is(err, want) {
+		t.Fatalf("workbookStream error = %v, want %v", err, want)
+	}
+	if errors.Is(err, ErrNoWorkbookStream) {
+		t.Errorf("a failed iteration was reported as a missing workbook stream")
+	}
+	if stream != nil {
+		t.Errorf("workbookStream returned a stream alongside its error")
+	}
+}
+
+// recordingReaderAt records the offset and length of every read made through
+// it.
+type recordingReaderAt struct {
+	reader io.ReaderAt
+	mu     sync.Mutex
+	reads  [][2]int64
+}
+
+func (r *recordingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	r.mu.Lock()
+	r.reads = append(r.reads, [2]int64{off, int64(len(p))})
+	r.mu.Unlock()
+	return r.reader.ReadAt(p, off)
+}
+
+// TestContainerReaderReadsTheWholeHeaderFirst pins the access pattern the
+// bound depends on.
+//
+// boundedContainerReader answers reads of the header and delegates the rest,
+// which only bounds anything while the container reader actually asks for its
+// header in one read from offset 0. Nothing in go.mod can express that, and
+// the effective version of the container reader is the maximum across a
+// five-module graph — another consumer of it already pins a different one — so
+// any dependency update anywhere can float it. If the access pattern ever
+// shifts, the bound stops applying while every open still reports success,
+// which is a failure with no symptom. This test is the alarm for it.
+func TestContainerReaderReadsTheWholeHeaderFirst(t *testing.T) {
+	recorder := &recordingReaderAt{reader: bytes.NewReader(containerFixture(t))}
+	if _, err := mscfb.New(recorder); err != nil {
+		t.Fatalf("open the container fixture: %v", err)
+	}
+
+	if len(recorder.reads) == 0 {
+		t.Fatal("the container reader made no reads")
+	}
+	if off, length := recorder.reads[0][0], recorder.reads[0][1]; off != 0 || length != cfbHeaderLen {
+		t.Errorf("first read was %d bytes at offset %d, want %d bytes at offset 0: the header is no longer read in one piece from the start, so serving it no longer bounds anything", length, off, cfbHeaderLen)
+	}
+	for i, read := range recorder.reads[1:] {
+		if read[0] < cfbHeaderLen {
+			t.Errorf("read %d was %d bytes at offset %d, inside the header: only the first read may be", i+1, read[1], read[0])
+		}
 	}
 }

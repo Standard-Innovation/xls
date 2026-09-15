@@ -3,6 +3,9 @@ name: ci
 on:
   push:
     branches: [main]
+    # Tags are built too: a tag is what every consumer resolves, so it is the
+    # one ref that must not be able to ship untested.
+    tags: ['v*']
   pull_request:
 
 permissions:
@@ -37,7 +40,7 @@ jobs:
 
       - name: gofmt (files this fork owns)
         run: |
-          unformatted="$(gofmt -l container.go container_test.go xls.go)"
+          unformatted="$(gofmt -l container.go container_test.go xls.go workbook.go)"
           if [ -n "$unformatted" ]; then
             echo "gofmt needed for: $unformatted"
             exit 1
