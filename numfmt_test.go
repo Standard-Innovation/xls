@@ -99,8 +99,9 @@ func TestIsElapsedTimeCode(t *testing.T) {
 	}
 }
 
-// Only formats render reproduces exactly are percent formats. Anything else in
-// any numeric section leaves every cell under the format with its bare value.
+// Only formats that percentFormat.render reproduces exactly parse as percent
+// formats; anything else in any numeric section leaves cells under the format
+// with their bare value.
 func TestParsePercentFormat(t *testing.T) {
 	tests := []struct {
 		format string
@@ -121,13 +122,14 @@ func TestParsePercentFormat(t *testing.T) {
 		{"0.0%;0.0%", true},
 		{"0%;-0%;0.0%", true},
 		{"0.00%;-0.00%;0.00%;@", true},
+		{`0.00%;-0.00%;0.00%;"a;b"`, true},
 		// Not percent formats.
 		{"0.00", false},
 		{"General", false},
 		{"@", false},
 		{`0.00;"%"`, false},
 		{"%", false},
-		// Percent formats render does not reproduce exactly.
+		// Percent-like formats that are not reproduced exactly.
 		{`0.00"%"`, false},
 		{`0.00\%`, false},
 		{`"+"0.0%`, false},
@@ -167,7 +169,6 @@ func TestParsePercentFormat(t *testing.T) {
 		{"0%;", false},
 		{"0%;--0%", false},
 		{"0%;0-%", false},
-		{"0%;0%;0%;@;x", false},
 	}
 	for _, tc := range tests {
 		if _, ok := parsePercentFormat(tc.format); ok != tc.ok {
@@ -224,8 +225,9 @@ func TestPercentFormatRender(t *testing.T) {
 		{0.05, "0.0%[Red]", "5.0%"},
 		// A negative value that rounds to zero keeps its sign.
 		{-0.00001, "0.00%", "-0.00%"},
-		// Sections: positive and zero take the first, negatives the second,
-		// which prints a sign only if it has a literal '-'; zero the third.
+		// Negatives take the second section, which prints a sign only if it
+		// has a literal '-'; zero takes the third section if there is one,
+		// otherwise the first.
 		{0.05, "0.00%;[Red]-0.00%", "5.00%"},
 		{-0.05, "0.00%;[Red]-0.00%", "-5.00%"},
 		{-0.05, "0.0%;0.0%", "5.0%"},
@@ -257,34 +259,6 @@ func TestPercentFormatRenderDeclines(t *testing.T) {
 	for _, v := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
 		if got, ok := pf.render(v); ok {
 			t.Errorf("render(%v) = %q, want no rendering", v, got)
-		}
-	}
-}
-
-func TestSplitSections(t *testing.T) {
-	tests := []struct {
-		format string
-		want   []string
-	}{
-		{"0%", []string{"0%"}},
-		{"0%;-0%", []string{"0%", "-0%"}},
-		{`0%;"a;b"`, []string{"0%", `"a;b"`}},
-		{`0%;\;x`, []string{"0%", `\;x`}},
-		{"0%;[a;b]x", []string{"0%", "[a;b]x"}},
-		{"0%;[Red", []string{"0%", "[Red"}},
-		{"0%;", []string{"0%", ""}},
-	}
-	for _, tc := range tests {
-		got := splitSections(tc.format)
-		if len(got) != len(tc.want) {
-			t.Errorf("splitSections(%q) = %q, want %q", tc.format, got, tc.want)
-			continue
-		}
-		for i := range got {
-			if got[i] != tc.want[i] {
-				t.Errorf("splitSections(%q) = %q, want %q", tc.format, got, tc.want)
-				break
-			}
 		}
 	}
 }

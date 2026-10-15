@@ -153,7 +153,7 @@ func TestXfRkString(t *testing.T) {
 		{"user percent int x100", 169, "0.0%", true, rkIntX100(85), "85.0%"},
 		// A FORMAT record that redefines a built-in percent index decides.
 		{"redefined builtin percent", 10, "0.0%", true, rkIntX100(99), "99.0%"},
-		// A negative section renders a negative value.
+		// A literal '-' in the negative section prints the sign.
 		{"user percent negative section", 173, "0.0%;-0.0%", true, rkIntX100(-5), "-5.0%"},
 		// A percent format this package cannot reproduce keeps the bare value.
 		{"user percent not reproduced", 174, "0.0%;(0.0%)", true, rkIntX100(-5), "-0.05"},
@@ -212,8 +212,7 @@ func TestRKFloat(t *testing.T) {
 	}
 }
 
-// NUMBER cells applied no format before percent formats were rendered, so the
-// percent path is the whole of their formatted behaviour; every other format
+// NUMBER cells are formatted only under percent formats; every other format
 // keeps the full stored precision.
 func TestNumberColString(t *testing.T) {
 	tests := []struct {

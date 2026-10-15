@@ -87,22 +87,18 @@ type percentSection struct {
 // parsePercentFormat reports whether an Excel number-format string is a
 // percent format this package renders exactly as Excel does, and how.
 //
-// Every numeric section must be made of '0' and '#' placeholders, one '.',
-// ',' grouping between integer placeholders, and one trailing '%', with
-// colour or plain locale tags such as [Red] or [$-409]; the negative section
-// may also start its number with a literal '-'. A fourth section applies only
-// to text and is not read. Anything else -- literal text, quotes, escapes,
-// padding, fill, '?', a fraction, an exponent, a scaling ',', a '%' before a
-// placeholder, a condition, a currency tag, an empty section -- would print
-// differently from Excel, so the whole format is reported as not a percent
-// format and every cell under it keeps its bare value. Rejecting the whole
-// format, rather than one section, keeps a column from mixing percentages
+// Each numeric section may hold only '0' and '#' placeholders, one '.', ','
+// grouping between integer placeholders, one trailing '%', and display-only
+// tags such as [Red] or [$-409]; the negative section may also start with a
+// literal '-'. The text section is ignored. Anything else would print
+// differently from Excel, so the whole format is rejected, not one section,
+// and every cell under it keeps its bare value rather than mixing percentages
 // with bare fractions.
 func parsePercentFormat(s string) (percentFormat, bool) {
-	sections := splitSections(s)
-	if len(sections) > 4 {
-		return percentFormat{}, false
-	}
+	// A ';' inside a quote, escape or bracket would be split here too, but
+	// every such construct rejects its numeric section anyway. A fourth
+	// section applies only to text and is not read.
+	sections := strings.SplitN(s, ";", 4)
 	if len(sections) == 4 {
 		sections = sections[:3]
 	}
@@ -133,7 +129,7 @@ func parsePercentSection(s string, allowMinus bool) (percentSection, bool) {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if percent && c != '[' {
-			// Only tags may follow the '%': render prints it last.
+			// The '%' is always printed last, so only tags may follow it.
 			return ps, false
 		}
 		switch c {
@@ -200,7 +196,7 @@ func isDisplayOnlyTag(group string) bool {
 	}
 	if n, ok := strings.CutPrefix(g, "color"); ok {
 		v, err := strconv.Atoi(n)
-		return isDigits(n) && n[0] != '0' && err == nil && v >= 1 && v <= 56
+		return err == nil && n[0] >= '1' && n[0] <= '9' && v <= 56
 	}
 	if lcid, ok := strings.CutPrefix(g, "$-"); ok {
 		// The high byte of a locale tag selects a digit set; zero keeps the
@@ -212,52 +208,9 @@ func isDisplayOnlyTag(group string) bool {
 	return false
 }
 
-// isDigits reports whether s is a non-empty run of ASCII digits.
-func isDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-// splitSections splits a format string on the ';' that separate its sections,
-// leaving those inside quoted literals, escapes and bracketed groups.
-func splitSections(s string) []string {
-	var sections []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case ';':
-			sections = append(sections, s[start:i])
-			start = i + 1
-		case '"':
-			for i++; i < len(s) && s[i] != '"'; i++ {
-			}
-		case '\\', '_', '*':
-			i++
-		case '[':
-			end := strings.IndexByte(s[i:], ']')
-			if end < 0 {
-				i = len(s)
-				continue
-			}
-			i += end
-		}
-	}
-	return append(sections, s[start:])
-}
-
-// builtinPercentFormats are the built-in percent formats: 9 is "0%" and 10 is
-// "0.00%".
-var builtinPercentFormats = map[uint16]percentFormat{
-	9:  {positive: percentSection{minIntDigits: 1}},
-	10: {positive: percentSection{minIntDigits: 1, minDecimals: 2, maxDecimals: 2, point: true}},
-}
+// builtinPercentFormats are the format strings of the built-in percent
+// formats.
+var builtinPercentFormats = map[uint16]string{9: "0%", 10: "0.00%"}
 
 // percentFormatOf classifies a cell's number format as a percent format. A
 // FORMAT record, when the workbook has one for the index, decides; otherwise
@@ -266,8 +219,10 @@ func percentFormatOf(formatNo uint16, f *Format) (percentFormat, bool) {
 	if f != nil {
 		return parsePercentFormat(f.str)
 	}
-	pf, ok := builtinPercentFormats[formatNo]
-	return pf, ok
+	if str, ok := builtinPercentFormats[formatNo]; ok {
+		return parsePercentFormat(str)
+	}
+	return percentFormat{}, false
 }
 
 // render prints a stored fraction as Excel does under this format, and reports
