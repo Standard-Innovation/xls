@@ -7,9 +7,9 @@ A maintained fork of [extrame/xls](https://github.com/extrame/xls) at tag
 fixes. Apache-2.0, as upstream: see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 This is not original work. Every file outside `numfmt.go`, the parts of
-`col.go` that `NOTICE` lists, and the tests is upstream's, unmodified — including `LICENSE`, which
-is upstream's verbatim. `NOTICE` lists exactly which files differ from
-`v0.0.1`.
+`col.go` that `NOTICE` lists, and the tests is upstream's, unmodified —
+including `LICENSE`, which is upstream's verbatim. `NOTICE` lists exactly
+which files differ from `v0.0.1`.
 
 What changed and why is summarised below. The change-by-change record lives in
 this repository's commit history rather than in a design document checked in
@@ -51,12 +51,14 @@ renders 100x too large. A third change renders percent formats.
 
 3. Percent-formatted cells rendered as their bare stored fraction, so a cell
    Excel prints as `80.00%` read `0.8`, and a caller could not tell a share
-   from a share x 100. A cell whose format is a percent format, the built-in
-   `0%` (9) or `0.00%` (10) or any FORMAT record with a `%` in its first
-   section, now renders as Excel prints it: scaled by 100, rounded half away
-   from zero, optional decimals (`#`, `?`) trimmed, thousands grouped, with
-   `%`. This applies to RK, MULRK and NUMBER cells. A FORMAT record for an
-   index decides over the built-in percent indices.
+   from a share x 100. A percent-formatted cell now renders as Excel prints
+   it: scaled by 100 and cut to 15 significant digits, Excel's display
+   precision; rounded half away from zero; optional `#` decimals trimmed;
+   the integer part zero-padded and grouped as the format says; then `%`.
+   This applies to RK, MULRK and NUMBER cells under the built-in `0%` (9) or
+   `0.00%` (10), or under a FORMAT record for any index whose first section
+   is a percent format this package can reproduce exactly. A FORMAT record
+   for an index decides over the built-in percent indices.
 
 Not fixed here: apart from percent formats, `NumberCol.String` still ignores
 number formats, so a NUMBER-encoded cell renders as its full stored precision
@@ -78,16 +80,23 @@ covering it properly means a per-locale code table, so it is left open.
 
 ## Known limitations of percent rendering
 
-- Only the first format section is read, as in `isDateFormat`. A format with a
-  negative section such as `0.00%;(0.00%)` renders -0.05 as `-5.00%`, where
-  Excel prints `(5.00%)`.
-- `?` is treated as an optional digit and trimmed. Excel prints a space in its
-  place to align decimals.
-- A percent format with an exponent (`0.00E+00%`), a `,` that scales by 1000,
-  or more than one `%` is not rendered: the cell keeps its bare stored value
-  rather than a rendering that differs from Excel's.
-- A negative value that rounds to zero keeps its sign, so -0.00001 under
-  `0.00%` renders as `-0.00%`.
+Only percent formats whose first section is made of `0` and `#`
+placeholders, one `.`, `,` grouping, one `%`, and colour or plain locale tags
+such as `[Red]` or `[$-409]` are rendered. A cell under any other percent
+format keeps its bare stored value rather than a rendering that differs from
+Excel's. That covers formats with:
+
+- literal text, quoted or not, including signs, brackets and spaces
+  (`+0.0%`, `0.0% "p.a."`, `0.00 %`, `(0.0%)`);
+- padding or fill (`0.00%_)`, `*`), or `?` placeholders;
+- a fraction (`# ?/?%`), an exponent (`0.00E+00%`), a `,` that scales by
+  1000, or more than one `%`;
+- a condition (`[<1]0%;0.0%`) or a currency tag (`[$€-407]`).
+
+Only the first section is read, as in `isDateFormat`. A negative value under
+a format with a negative section, and zero under a format with a zero
+section, keep their bare value. A negative value that rounds to zero keeps
+its sign, so -0.00001 under `0.00%` renders as `-0.00%`.
 
 ## Known issues inherited from upstream
 

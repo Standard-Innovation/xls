@@ -153,6 +153,8 @@ func TestXfRkString(t *testing.T) {
 		{"user percent int x100", 169, "0.0%", true, rkIntX100(85), "85.0%"},
 		// A FORMAT record that redefines a built-in percent index decides.
 		{"redefined builtin percent", 10, "0.0%", true, rkIntX100(99), "99.0%"},
+		// A value its percent format does not render keeps the bare value.
+		{"user percent negative section", 173, "0.0%;(0.0%)", true, rkIntX100(-5), "-0.05"},
 		// The built-in date range keeps its own lossy rendering, unchanged.
 		{"builtin date int", 14, "", false, rkInt(45306), "2024.01"},
 	}
@@ -223,6 +225,7 @@ func TestNumberColString(t *testing.T) {
 		{"user percent", 170, "0.0%", true, 0.333333, "33.3%"},
 		{"user numeric", 171, "0.00", true, 0.333333, "0.333333"},
 		{"user index without format record", 172, "", false, 0.333333, "0.333333"},
+		{"user percent negative section", 173, "0.0%;(0.0%)", true, -0.05, "-0.05"},
 		{"builtin general", 0, "", false, 0.9999000000099991, "0.9999000000099991"},
 	}
 	for _, tc := range tests {

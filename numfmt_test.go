@@ -1,6 +1,9 @@
 package xls
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // The cases the reader has to separate are numeric formats that contain a
 // letter Excel also uses as a date code, and date formats whose codes are
@@ -96,46 +99,68 @@ func TestIsElapsedTimeCode(t *testing.T) {
 	}
 }
 
-// A "%" is the percent operator only outside literals, escapes and bracketed
-// groups, and only in the first section. Fixed decimals are the '0'
-// placeholders after the point; optional ones are '#' and '?'. Formats the
-// renderer cannot print as Excel does are not treated as percent formats.
+// Only formats render reproduces exactly are percent formats; every other
+// construct in the first section leaves the cell's bare value.
 func TestParsePercentFormat(t *testing.T) {
+	two := percentFormat{minIntDigits: 1, minDecimals: 2, maxDecimals: 2, point: true, sections: 1}
 	tests := []struct {
 		format string
 		want   percentFormat
 		ok     bool
 	}{
-		{"0%", percentFormat{}, true},
-		{"0.00%", percentFormat{minDecimals: 2, maxDecimals: 2}, true},
-		{"0.0#%", percentFormat{minDecimals: 1, maxDecimals: 2}, true},
-		{"0.0###%", percentFormat{minDecimals: 1, maxDecimals: 4}, true},
-		{"0.??%", percentFormat{maxDecimals: 2}, true},
-		{"#,##0%", percentFormat{grouped: true}, true},
-		{"#,##0.00%;[Red]-#,##0.00%", percentFormat{minDecimals: 2, maxDecimals: 2, grouped: true}, true},
-		{"[$-409]0.00%", percentFormat{minDecimals: 2, maxDecimals: 2}, true},
-		{`0.00"%"`, percentFormat{}, false},
-		{`0.00\%`, percentFormat{}, false},
-		{`0.00;"%"`, percentFormat{}, false},
+		{"0%", percentFormat{minIntDigits: 1, sections: 1}, true},
+		{"0.00%", two, true},
+		{"0.0#%", percentFormat{minIntDigits: 1, minDecimals: 1, maxDecimals: 2, point: true, sections: 1}, true},
+		{"0.0###%", percentFormat{minIntDigits: 1, minDecimals: 1, maxDecimals: 4, point: true, sections: 1}, true},
+		{"00.00%", percentFormat{minIntDigits: 2, minDecimals: 2, maxDecimals: 2, point: true, sections: 1}, true},
+		{"#.00%", percentFormat{minDecimals: 2, maxDecimals: 2, point: true, sections: 1}, true},
+		{"#,##0%", percentFormat{minIntDigits: 1, grouped: true, sections: 1}, true},
+		{"[Red]0.00%", two, true},
+		{"[Color10]0.00%", two, true},
+		{"[$-409]0.00%", two, true},
+		{"0.00%;[Red]-0.00%", percentFormat{minIntDigits: 1, minDecimals: 2, maxDecimals: 2, point: true, sections: 2}, true},
+		{`0.00%;"neg";"zero"`, percentFormat{minIntDigits: 1, minDecimals: 2, maxDecimals: 2, point: true, sections: 3}, true},
+		{`0.00%;"a;b"`, percentFormat{minIntDigits: 1, minDecimals: 2, maxDecimals: 2, point: true, sections: 2}, true},
+		{`0.00%;\;x`, percentFormat{minIntDigits: 1, minDecimals: 2, maxDecimals: 2, point: true, sections: 2}, true},
+		{"0.00%;[Red", percentFormat{minIntDigits: 1, minDecimals: 2, maxDecimals: 2, point: true, sections: 2}, true},
+		// Not percent formats.
 		{"0.00", percentFormat{}, false},
 		{"General", percentFormat{}, false},
 		{"@", percentFormat{}, false},
-		// Printable by Excel, but not by this renderer: left as bare values.
+		{`0.00;"%"`, percentFormat{}, false},
+		{"%", percentFormat{}, false},
+		// Percent formats render does not reproduce: the bare value is kept.
+		{`0.00"%"`, percentFormat{}, false},
+		{`0.00\%`, percentFormat{}, false},
+		{`"+"0.0%`, percentFormat{}, false},
+		{"+0.0%", percentFormat{}, false},
+		{`0.0%" up"`, percentFormat{}, false},
+		{"0.00 %", percentFormat{}, false},
+		{"0.00%_)", percentFormat{}, false},
+		{"(0.0%)", percentFormat{}, false},
+		{"0.??%", percentFormat{}, false},
+		{"# ?/?%", percentFormat{}, false},
 		{"0.00E+00%", percentFormat{}, false},
 		{"0,%", percentFormat{}, false},
 		{"0,.0%", percentFormat{}, false},
+		{"0.0,%", percentFormat{}, false},
+		{"0.0.0%", percentFormat{}, false},
 		{"0%%", percentFormat{}, false},
+		{"[<1]0%;0.0%", percentFormat{}, false},
+		{"[$€-407]0.00%", percentFormat{}, false},
+		{"[Red0.00%", percentFormat{}, false},
 	}
-	for _, tt := range tests {
-		got, ok := parsePercentFormat(tt.format)
-		if ok != tt.ok || (ok && got != tt.want) {
-			t.Errorf("parsePercentFormat(%q) = (%+v, %v), want (%+v, %v)", tt.format, got, ok, tt.want, tt.ok)
+	for _, tc := range tests {
+		got, ok := parsePercentFormat(tc.format)
+		if ok != tc.ok || (ok && got != tc.want) {
+			t.Errorf("parsePercentFormat(%q) = (%+v, %v), want (%+v, %v)", tc.format, got, ok, tc.want, tc.ok)
 		}
 	}
 }
 
 // Rendering must match what Excel prints: half away from zero on the value
-// cut to 15 significant digits, optional decimals trimmed, thousands grouped.
+// cut to 15 significant digits, optional decimals trimmed, the integer part
+// zero-padded and grouped as the format says.
 func TestPercentFormatRender(t *testing.T) {
 	tests := []struct {
 		v      float64
@@ -148,6 +173,7 @@ func TestPercentFormatRender(t *testing.T) {
 		{0.1875, "0.00%", "18.75%"},
 		{1.0 / 3, "0.00%", "33.33%"},
 		{0, "0.00%", "0.00%"},
+		{math.Copysign(0, -1), "0.00%", "0.00%"},
 		{-0.99, "0.00%", "-99.00%"},
 		// Ties round half away from zero, after the binary product is cut
 		// to 15 significant digits.
@@ -156,23 +182,61 @@ func TestPercentFormatRender(t *testing.T) {
 		{0.145, "0%", "15%"},
 		{0.285, "0.0%", "28.5%"},
 		{0.00125, "0.00%", "0.13%"},
-		// Optional decimals print only when significant.
+		// Optional decimals print only when significant; the point stays.
 		{0.1, "0.0#%", "10.0%"},
 		{0.12345, "0.0#%", "12.35%"},
-		{0.5, "0.##%", "50%"},
+		{0.5, "0.##%", "50.%"},
+		// Integer placeholders.
+		{0.005, "00.00%", "00.50%"},
+		{0.005, "#.00%", ".50%"},
+		{0.001, "#%", "%"},
 		// Thousands grouping.
+		{0.5, "#,##0%", "50%"},
 		{12.34, "#,##0%", "1,234%"},
 		{1234.5678, "#,##0.00%", "123,456.78%"},
+		// Colour and locale tags do not change the text.
+		{0.05, "[Red]0.0%", "5.0%"},
 		// A negative value that rounds to zero keeps its sign.
 		{-0.00001, "0.00%", "-0.00%"},
+		// The first section covers positives and, with two sections, zero.
+		{0.05, "0.0%;0.0%", "5.0%"},
+		{0, "0.0%;0.0%", "0.0%"},
 	}
-	for _, tt := range tests {
-		pf, ok := parsePercentFormat(tt.format)
+	for _, tc := range tests {
+		pf, ok := parsePercentFormat(tc.format)
 		if !ok {
-			t.Fatalf("parsePercentFormat(%q) not a percent format", tt.format)
+			t.Errorf("parsePercentFormat(%q) not a percent format", tc.format)
+			continue
 		}
-		if got := pf.render(tt.v); got != tt.want {
-			t.Errorf("render(%v) under %q = %q, want %q", tt.v, tt.format, got, tt.want)
+		if got, ok := pf.render(tc.v); !ok || got != tc.want {
+			t.Errorf("render(%v) under %q = (%q, %v), want (%q, true)", tc.v, tc.format, got, ok, tc.want)
+		}
+	}
+}
+
+// A value the first section does not cover, or with no finite percentage,
+// is not rendered, so the caller keeps the bare value.
+func TestPercentFormatRenderDeclines(t *testing.T) {
+	tests := []struct {
+		v      float64
+		format string
+	}{
+		{-0.05, "0.0%;0.0%"},
+		{-0.05, "0.0%;(0.0%)"},
+		{0, `0.0%;-0.0%;"-"`},
+		{math.NaN(), "0%"},
+		{math.Inf(1), "0%"},
+		{math.Inf(-1), "0%"},
+		{math.MaxFloat64, "0%"},
+	}
+	for _, tc := range tests {
+		pf, ok := parsePercentFormat(tc.format)
+		if !ok {
+			t.Errorf("parsePercentFormat(%q) not a percent format", tc.format)
+			continue
+		}
+		if got, ok := pf.render(tc.v); ok {
+			t.Errorf("render(%v) under %q = %q, want no rendering", tc.v, tc.format, got)
 		}
 	}
 }
