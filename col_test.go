@@ -231,6 +231,7 @@ func TestNumberColString(t *testing.T) {
 		{"user index without format record", 172, "", false, 0.333333, "0.333333"},
 		{"user percent negative section", 173, "0.0%;-0.0%", true, -0.05, "-5.0%"},
 		{"user percent not reproduced", 174, "0.0%;(0.0%)", true, -0.05, "-0.05"},
+		{"redefined builtin percent as numeric", 9, "0.00", true, 0.5, "0.5"},
 		{"builtin percent NaN", 9, "", false, math.NaN(), "NaN"},
 		{"builtin general", 0, "", false, 0.9999000000099991, "0.9999000000099991"},
 	}

@@ -157,6 +157,9 @@ func TestParsePercentFormat(t *testing.T) {
 		{"[$-]0.00%", false},
 		{"[Color]0.00%", false},
 		{"[Color57]0.00%", false},
+		{"[Color+5]0.00%", false},
+		{"[$-F800]0.00%", false},
+		{"[$-F400]0.00%", false},
 		{"[Red0.00%", false},
 		// A section the format cannot render rejects the whole format.
 		{"0.0%;(0.0%)", false},
@@ -229,6 +232,11 @@ func TestPercentFormatRender(t *testing.T) {
 		{0, "0.0%;-0.0%", "0.0%"},
 		{0, "0%;-0%;0.0%", "0.0%"},
 		{-0.05, "0%;-0.0%;0.00%", "-5.0%"},
+		// The section follows the value, not its rounding.
+		{-0.0001, "0%;-0%", "-0%"},
+		{-0.0001, "0%;0%", "0%"},
+		{math.Copysign(0, -1), "0%;-0%;0.0%", "0.0%"},
+		{1e-6, "0%;-0%;0.0%", "0%"},
 	}
 	for _, tc := range tests {
 		pf, ok := parsePercentFormat(tc.format)

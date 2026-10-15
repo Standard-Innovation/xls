@@ -28,7 +28,8 @@ Modified:
                    parameter is removed; ErrNoWorkbookStream added.
   workbook.go      Reads from the workbook stream; a sheet whose declared
                    position lies outside the stream yields an empty sheet.
-  example_test.go  Example renamed to match the method it documents.
+  example_test.go  Example renamed to match the method it documents; calls
+                   Open without the removed charset parameter.
   xls_test.go      Calls Open without the removed charset parameter.
   README.md        Rewritten to describe this fork; upstream's text retained
                    verbatim under "Upstream README".

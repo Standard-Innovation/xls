@@ -66,9 +66,8 @@ func isElapsedTimeCode(group string) bool {
 }
 
 // percentFormat is how a percent number format prints a value. Like Excel, it
-// applies its first section to positive values (and to zero and negatives
-// when it has no other section), its second to negative values, and its third
-// to zero.
+// applies its second section to negative values and its third to zero; the
+// first section takes every value no other section covers.
 type percentFormat struct {
 	positive percentSection
 	negative *percentSection
@@ -201,15 +200,29 @@ func isDisplayOnlyTag(group string) bool {
 	}
 	if n, ok := strings.CutPrefix(g, "color"); ok {
 		v, err := strconv.Atoi(n)
-		return err == nil && v >= 1 && v <= 56 && n[0] != '0'
+		return isDigits(n) && n[0] != '0' && err == nil && v >= 1 && v <= 56
 	}
 	if lcid, ok := strings.CutPrefix(g, "$-"); ok {
 		// The high byte of a locale tag selects a digit set; zero keeps the
-		// ASCII digits this package prints.
+		// ASCII digits this package prints. F400 and F800 are the system time
+		// and long-date formats, not locales.
 		v, err := strconv.ParseUint(lcid, 16, 32)
-		return err == nil && v>>24 == 0
+		return err == nil && v>>24 == 0 && v != 0xF400 && v != 0xF800
 	}
 	return false
+}
+
+// isDigits reports whether s is a non-empty run of ASCII digits.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // splitSections splits a format string on the ';' that separate its sections,
@@ -272,18 +285,19 @@ func (pf percentFormat) render(v float64) (string, bool) {
 	r, _ := new(big.Rat).SetString(strconv.FormatFloat(v, 'g', 15, 64))
 	r.Mul(r, big.NewRat(100, 1))
 
-	sec, sign := pf.positive, r.Sign() < 0
+	sec, signed := pf.positive, r.Sign() < 0
 	switch {
 	case v < 0 && pf.negative != nil:
-		sec, sign = *pf.negative, pf.negative.minus
+		sec, signed = *pf.negative, pf.negative.minus
 	case v == 0 && pf.zero != nil:
-		sec, sign = *pf.zero, false
+		sec, signed = *pf.zero, false
 	}
-	return sec.render(r.Abs(r), sign), true
+	return sec.render(r.Abs(r), signed), true
 }
 
-// render prints a non-negative percentage under this section.
-func (ps percentSection) render(r *big.Rat, minus bool) string {
+// render prints a non-negative percentage under this section, preceded by a
+// '-' if signed.
+func (ps percentSection) render(r *big.Rat, signed bool) string {
 	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(ps.maxDecimals)), nil)
 	r = new(big.Rat).Mul(r, new(big.Rat).SetInt(scale))
 	r.Add(r, big.NewRat(1, 2))
@@ -305,7 +319,7 @@ func (ps percentSection) render(r *big.Rat, minus bool) string {
 	}
 
 	var b strings.Builder
-	if minus {
+	if signed {
 		b.WriteByte('-')
 	}
 	b.WriteString(intPart)

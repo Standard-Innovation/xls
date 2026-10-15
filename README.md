@@ -58,8 +58,9 @@ renders 100x too large. A third change renders percent formats.
    then `%`. The section for the value's sign applies, as in Excel. This
    applies to RK, MULRK and NUMBER cells under the built-in `0%` (9) or
    `0.00%` (10), or under a FORMAT record for any index whose sections are
-   all percent formats this package can reproduce exactly. A FORMAT record
-   for an index decides over the built-in percent indices.
+   all percent formats this package can reproduce exactly. For percent
+   formats, a FORMAT record for an index decides over the built-in percent
+   indices.
 
 Not fixed here: apart from percent formats, `NumberCol.String` still ignores
 number formats, so a NUMBER-encoded cell renders as its full stored precision
@@ -94,7 +95,7 @@ mixes percentages with bare fractions. That covers formats with:
   (`+0.0%`, `0.0% "p.a."`, `0.00 %`, `0.0%;(0.0%)`, `%0`);
 - padding or fill (`0.00%_)`, `*`), or `?` placeholders;
 - a fraction (`# ?/?%`), an exponent (`0.00E+00%`), a `,` that scales by
-  1000, or more than one `%`;
+  1000, consecutive commas, or more than one `%`;
 - a condition in any section (`0%;[>1]0.0%`), a currency tag (`[$€-407]`),
   or a locale tag that selects native digits;
 - an empty section (`0%;`).
