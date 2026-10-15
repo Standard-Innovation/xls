@@ -6,10 +6,10 @@ A maintained fork of [extrame/xls](https://github.com/extrame/xls) at tag
 — re-moduled as `github.com/Standard-Innovation/xls` and carrying number-format
 fixes. Apache-2.0, as upstream: see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-This is not original work. Every file outside `numfmt.go`, the parts of
-`col.go` that `NOTICE` lists, and the tests is upstream's, unmodified —
-including `LICENSE`, which is upstream's verbatim. `NOTICE` lists exactly
-which files differ from `v0.0.1`.
+This is not original work. Apart from the files `NOTICE` lists as added or
+modified, every file is upstream's, unmodified — including `LICENSE`, which
+is upstream's verbatim. `NOTICE` lists exactly which files differ from
+`v0.0.1`, and what changed in each.
 
 What changed and why is summarised below. The change-by-change record lives in
 this repository's commit history rather than in a design document checked in
@@ -52,12 +52,13 @@ renders 100x too large. A third change renders percent formats.
 3. Percent-formatted cells rendered as their bare stored fraction, so a cell
    Excel prints as `80.00%` read `0.8`, and a caller could not tell a share
    from a share x 100. A percent-formatted cell now renders as Excel prints
-   it: scaled by 100 and cut to 15 significant digits, Excel's display
-   precision; rounded half away from zero; optional `#` decimals trimmed;
-   the integer part zero-padded and grouped as the format says; then `%`.
-   This applies to RK, MULRK and NUMBER cells under the built-in `0%` (9) or
-   `0.00%` (10), or under a FORMAT record for any index whose first section
-   is a percent format this package can reproduce exactly. A FORMAT record
+   it: the stored value cut to 15 significant digits, Excel's display
+   precision, then scaled by 100; rounded half away from zero; padded and
+   trimmed from the outermost `0` placeholders; grouped as the format says;
+   then `%`. The section for the value's sign applies, as in Excel. This
+   applies to RK, MULRK and NUMBER cells under the built-in `0%` (9) or
+   `0.00%` (10), or under a FORMAT record for any index whose sections are
+   all percent formats this package can reproduce exactly. A FORMAT record
    for an index decides over the built-in percent indices.
 
 Not fixed here: apart from percent formats, `NumberCol.String` still ignores
@@ -80,23 +81,27 @@ covering it properly means a per-locale code table, so it is left open.
 
 ## Known limitations of percent rendering
 
-Only percent formats whose first section is made of `0` and `#`
-placeholders, one `.`, `,` grouping, one `%`, and colour or plain locale tags
-such as `[Red]` or `[$-409]` are rendered. A cell under any other percent
+A percent format is rendered only when each of its numeric sections is made
+of `0` and `#` placeholders, one `.`, `,` grouping, and one trailing `%`,
+with colour or plain locale tags such as `[Red]` or `[$-409]`; a negative
+section may also start its number with a literal `-`. A fourth section
+applies only to text and is not read. Every cell under any other percent
 format keeps its bare stored value rather than a rendering that differs from
-Excel's. That covers formats with:
+Excel's. The whole format falls back, not one section, so a column never
+mixes percentages with bare fractions. That covers formats with:
 
 - literal text, quoted or not, including signs, brackets and spaces
-  (`+0.0%`, `0.0% "p.a."`, `0.00 %`, `(0.0%)`);
+  (`+0.0%`, `0.0% "p.a."`, `0.00 %`, `0.0%;(0.0%)`, `%0`);
 - padding or fill (`0.00%_)`, `*`), or `?` placeholders;
 - a fraction (`# ?/?%`), an exponent (`0.00E+00%`), a `,` that scales by
   1000, or more than one `%`;
-- a condition (`[<1]0%;0.0%`) or a currency tag (`[$€-407]`).
+- a condition in any section (`0%;[>1]0.0%`), a currency tag (`[$€-407]`),
+  or a locale tag that selects native digits;
+- an empty section (`0%;`).
 
-Only the first section is read, as in `isDateFormat`. A negative value under
-a format with a negative section, and zero under a format with a zero
-section, keep their bare value. A negative value that rounds to zero keeps
-its sign, so -0.00001 under `0.00%` renders as `-0.00%`.
+A negative value that rounds to zero under a single-section format keeps
+its sign, so -0.00001 under `0.00%` renders as `-0.00%`. NaN and infinite
+values keep their bare value.
 
 ## Known issues inherited from upstream
 

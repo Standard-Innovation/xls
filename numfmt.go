@@ -65,108 +65,163 @@ func isElapsedTimeCode(group string) bool {
 	return false
 }
 
-// percentFormat is how a percent number format prints its value.
+// percentFormat is how a percent number format prints a value. Like Excel, it
+// applies its first section to positive values (and to zero and negatives
+// when it has no other section), its second to negative values, and its third
+// to zero.
 type percentFormat struct {
-	minIntDigits int  // '0' placeholders before the point: zero-padding
-	minDecimals  int  // '0' placeholders after the point: always printed
-	maxDecimals  int  // all digit placeholders after the point
-	point        bool // the format has a decimal point, printed even with no decimals
+	positive percentSection
+	negative *percentSection
+	zero     *percentSection
+}
+
+// percentSection is how one section of a percent format prints its value.
+type percentSection struct {
+	minIntDigits int  // placeholders from the leftmost integer '0': zero-padding
+	minDecimals  int  // placeholders through the rightmost decimal '0': always printed
+	maxDecimals  int  // all decimal placeholders
+	point        bool // the section has a decimal point, printed even with no decimals
 	grouped      bool // a ',' between integer placeholders groups thousands
-	sections     int  // number of ';'-separated sections
+	minus        bool // a literal '-' before the number (negative section only)
 }
 
 // parsePercentFormat reports whether an Excel number-format string is a
-// percent format this package renders, and how it prints.
+// percent format this package renders exactly as Excel does, and how.
 //
-// It accepts only what render reproduces exactly: a first section made of
-// '0' and '#' placeholders, one '.', ',' grouping between integer placeholders,
-// one '%', and colour or plain locale tags such as [Red] or [$-409]. Anything
-// else in the first section -- literal text, quotes, escapes, padding, fill,
-// '?', a fraction, an exponent, a scaling ',', a condition, a currency tag --
-// would print differently from Excel, so such a format is reported as not a
-// percent format and its cell keeps the bare stored value.
+// Every numeric section must be made of '0' and '#' placeholders, one '.',
+// ',' grouping between integer placeholders, and one trailing '%', with
+// colour or plain locale tags such as [Red] or [$-409]; the negative section
+// may also start its number with a literal '-'. A fourth section applies only
+// to text and is not read. Anything else -- literal text, quotes, escapes,
+// padding, fill, '?', a fraction, an exponent, a scaling ',', a '%' before a
+// placeholder, a condition, a currency tag, an empty section -- would print
+// differently from Excel, so the whole format is reported as not a percent
+// format and every cell under it keeps its bare value. Rejecting the whole
+// format, rather than one section, keeps a column from mixing percentages
+// with bare fractions.
 func parsePercentFormat(s string) (percentFormat, bool) {
+	sections := splitSections(s)
+	if len(sections) > 4 {
+		return percentFormat{}, false
+	}
+	if len(sections) == 4 {
+		sections = sections[:3]
+	}
 	var pf percentFormat
-	percents, digits := 0, 0
-	intDigit, pendingComma := false, false
-	i := 0
-first:
-	for ; i < len(s); i++ {
-		switch c := s[i]; c {
-		case ';':
-			break first
-		case '0', '#':
-			digits++
-			if pf.point {
-				pf.maxDecimals++
-				if c == '0' {
-					pf.minDecimals++
-				}
-				continue
-			}
-			if c == '0' {
-				pf.minIntDigits++
-			}
-			if pendingComma {
-				pf.grouped = true
-				pendingComma = false
-			}
-			intDigit = true
-		case ',':
-			if pf.point || !intDigit {
-				return pf, false
-			}
-			pendingComma = true
-		case '.':
-			if pf.point || pendingComma {
-				return pf, false
-			}
-			pf.point = true
-		case '%':
-			if pendingComma {
-				return pf, false
-			}
-			percents++
-		case '[':
-			end := strings.IndexByte(s[i:], ']')
-			if end < 0 || !isDisplayOnlyTag(s[i+1:i+end]) {
-				return pf, false
-			}
-			i += end
-		default:
-			return pf, false
+	for i, sec := range sections {
+		ps, ok := parsePercentSection(sec, i == 1)
+		if !ok {
+			return percentFormat{}, false
+		}
+		switch i {
+		case 0:
+			pf.positive = ps
+		case 1:
+			pf.negative = &ps
+		case 2:
+			pf.zero = &ps
 		}
 	}
-	if percents != 1 || digits == 0 || pendingComma {
-		return pf, false
-	}
-	pf.sections = 1 + countSectionSeparators(s[i:])
 	return pf, true
 }
 
+// parsePercentSection parses one section of a percent format; allowMinus
+// admits a literal '-' before the number, as a negative section may print.
+func parsePercentSection(s string, allowMinus bool) (percentSection, bool) {
+	var ps percentSection
+	var intPlaceholders, decPlaceholders []byte
+	percent, minus, pendingComma := false, false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if percent && c != '[' {
+			// Only tags may follow the '%': render prints it last.
+			return ps, false
+		}
+		switch c {
+		case '0', '#':
+			if ps.point {
+				decPlaceholders = append(decPlaceholders, c)
+				continue
+			}
+			if pendingComma {
+				ps.grouped = true
+				pendingComma = false
+			}
+			intPlaceholders = append(intPlaceholders, c)
+		case ',':
+			if ps.point || pendingComma || len(intPlaceholders) == 0 {
+				return ps, false
+			}
+			pendingComma = true
+		case '.':
+			if ps.point || pendingComma {
+				return ps, false
+			}
+			ps.point = true
+		case '%':
+			if pendingComma {
+				return ps, false
+			}
+			percent = true
+		case '-':
+			if !allowMinus || minus || ps.point || len(intPlaceholders) > 0 {
+				return ps, false
+			}
+			minus = true
+		case '[':
+			end := strings.IndexByte(s[i:], ']')
+			if end < 0 || !isDisplayOnlyTag(s[i+1:i+end]) {
+				return ps, false
+			}
+			i += end
+		default:
+			return ps, false
+		}
+	}
+	if !percent || len(intPlaceholders)+len(decPlaceholders) == 0 {
+		return ps, false
+	}
+	if j := strings.IndexByte(string(intPlaceholders), '0'); j >= 0 {
+		ps.minIntDigits = len(intPlaceholders) - j
+	}
+	ps.minDecimals = strings.LastIndexByte(string(decPlaceholders), '0') + 1
+	ps.maxDecimals = len(decPlaceholders)
+	ps.minus = minus
+	return ps, true
+}
+
 // isDisplayOnlyTag reports whether a bracketed format group changes nothing in
-// the printed text: a colour, or a locale tag with no currency symbol.
+// the printed text: one of Excel's colours, or a locale tag that names no
+// currency symbol and no native digit set.
 func isDisplayOnlyTag(group string) bool {
-	switch g := strings.ToLower(group); {
-	case g == "black", g == "blue", g == "cyan", g == "green",
-		g == "magenta", g == "red", g == "white", g == "yellow":
+	g := strings.ToLower(group)
+	switch g {
+	case "black", "blue", "cyan", "green", "magenta", "red", "white", "yellow":
 		return true
-	case strings.HasPrefix(g, "color"):
-		return true
-	case strings.HasPrefix(g, "$-"):
-		return true
+	}
+	if n, ok := strings.CutPrefix(g, "color"); ok {
+		v, err := strconv.Atoi(n)
+		return err == nil && v >= 1 && v <= 56 && n[0] != '0'
+	}
+	if lcid, ok := strings.CutPrefix(g, "$-"); ok {
+		// The high byte of a locale tag selects a digit set; zero keeps the
+		// ASCII digits this package prints.
+		v, err := strconv.ParseUint(lcid, 16, 32)
+		return err == nil && v>>24 == 0
 	}
 	return false
 }
 
-// countSectionSeparators counts the ';' that separate sections, skipping
-// those inside quoted literals, escapes and bracketed groups.
-func countSectionSeparators(s string) int {
-	n := 0
+// splitSections splits a format string on the ';' that separate its sections,
+// leaving those inside quoted literals, escapes and bracketed groups.
+func splitSections(s string) []string {
+	var sections []string
+	start := 0
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
 		case ';':
-			n++
+			sections = append(sections, s[start:i])
+			start = i + 1
 		case '"':
 			for i++; i < len(s) && s[i] != '"'; i++ {
 			}
@@ -175,19 +230,20 @@ func countSectionSeparators(s string) int {
 		case '[':
 			end := strings.IndexByte(s[i:], ']')
 			if end < 0 {
-				return n
+				i = len(s)
+				continue
 			}
 			i += end
 		}
 	}
-	return n
+	return append(sections, s[start:])
 }
 
 // builtinPercentFormats are the built-in percent formats: 9 is "0%" and 10 is
 // "0.00%".
 var builtinPercentFormats = map[uint16]percentFormat{
-	9:  {minIntDigits: 1, sections: 1},
-	10: {minIntDigits: 1, minDecimals: 2, maxDecimals: 2, point: true, sections: 1},
+	9:  {positive: percentSection{minIntDigits: 1}},
+	10: {positive: percentSection{minIntDigits: 1, minDecimals: 2, maxDecimals: 2, point: true}},
 }
 
 // percentFormatOf classifies a cell's number format as a percent format. A
@@ -202,62 +258,63 @@ func percentFormatOf(formatNo uint16, f *Format) (percentFormat, bool) {
 }
 
 // render prints a stored fraction as Excel does under this format, and reports
-// false when it cannot, so the caller keeps the bare value: a negative value
-// under a format with a negative section, zero under a format with a zero
-// section, or a value with no finite percentage.
+// false for NaN and the infinities, which have no percentage to print.
 //
-// The value is scaled by 100 and cut to 15 significant digits, Excel's display
-// precision, so a product such as 0.145*100 = 14.499999999999998 rounds as the
-// 14.5 it stands for. It is then rounded half away from zero to maxDecimals in
-// exact decimal arithmetic, trailing zeros are trimmed down to minDecimals, the
-// integer part is zero-padded to minIntDigits and grouped if the format groups
-// thousands, and "%" is appended.
+// The stored value is first cut to 15 significant digits, Excel's display
+// precision, then scaled by 100 in exact decimal arithmetic, so 0.145 rounds as
+// the 14.5 it stands for rather than as 0.145*100 = 14.499999999999998. The
+// section for the value's sign then rounds it half away from zero, trims
+// optional decimals, zero-pads and groups the integer part, and appends "%".
 func (pf percentFormat) render(v float64) (string, bool) {
-	if pf.sections >= 2 && v < 0 || pf.sections >= 3 && v == 0 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
 		return "", false
 	}
-	scaled := v * 100
-	if math.IsNaN(scaled) || math.IsInf(scaled, 0) {
-		return "", false
-	}
-	r, ok := new(big.Rat).SetString(strconv.FormatFloat(scaled, 'g', 15, 64))
-	if !ok {
-		return "", false
-	}
-	negative := r.Sign() < 0
-	r.Abs(r)
+	r, _ := new(big.Rat).SetString(strconv.FormatFloat(v, 'g', 15, 64))
+	r.Mul(r, big.NewRat(100, 1))
 
-	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(pf.maxDecimals)), nil)
-	r.Mul(r, new(big.Rat).SetInt(scale))
+	sec, sign := pf.positive, r.Sign() < 0
+	switch {
+	case v < 0 && pf.negative != nil:
+		sec, sign = *pf.negative, pf.negative.minus
+	case v == 0 && pf.zero != nil:
+		sec, sign = *pf.zero, false
+	}
+	return sec.render(r.Abs(r), sign), true
+}
+
+// render prints a non-negative percentage under this section.
+func (ps percentSection) render(r *big.Rat, minus bool) string {
+	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(ps.maxDecimals)), nil)
+	r = new(big.Rat).Mul(r, new(big.Rat).SetInt(scale))
 	r.Add(r, big.NewRat(1, 2))
 	digits := new(big.Int).Quo(r.Num(), r.Denom()).String()
-	if len(digits) < pf.maxDecimals {
-		digits = strings.Repeat("0", pf.maxDecimals-len(digits)) + digits
+	if len(digits) < ps.maxDecimals {
+		digits = strings.Repeat("0", ps.maxDecimals-len(digits)) + digits
 	}
 
-	intPart := strings.TrimLeft(digits[:len(digits)-pf.maxDecimals], "0")
-	if len(intPart) < pf.minIntDigits {
-		intPart = strings.Repeat("0", pf.minIntDigits-len(intPart)) + intPart
+	intPart := strings.TrimLeft(digits[:len(digits)-ps.maxDecimals], "0")
+	if len(intPart) < ps.minIntDigits {
+		intPart = strings.Repeat("0", ps.minIntDigits-len(intPart)) + intPart
 	}
-	if pf.grouped {
+	if ps.grouped {
 		intPart = groupThousands(intPart)
 	}
-	frac := digits[len(digits)-pf.maxDecimals:]
-	for len(frac) > pf.minDecimals && frac[len(frac)-1] == '0' {
+	frac := digits[len(digits)-ps.maxDecimals:]
+	for len(frac) > ps.minDecimals && frac[len(frac)-1] == '0' {
 		frac = frac[:len(frac)-1]
 	}
 
 	var b strings.Builder
-	if negative {
+	if minus {
 		b.WriteByte('-')
 	}
 	b.WriteString(intPart)
-	if pf.point {
+	if ps.point {
 		b.WriteByte('.')
 		b.WriteString(frac)
 	}
 	b.WriteByte('%')
-	return b.String(), true
+	return b.String()
 }
 
 // groupThousands inserts a "," every three digits from the right.

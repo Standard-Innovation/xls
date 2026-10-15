@@ -23,7 +23,13 @@ Modified:
                    flag on the integer variant; RK.value added; XfRk.String
                    and NumberCol.String render percent-formatted numbers
                    scaled by 100 with "%".
+  xls.go           Open and OpenReader read the workbook stream through the
+                   compound-file reader in container.go; the unused charset
+                   parameter is removed; ErrNoWorkbookStream added.
+  workbook.go      Reads from the workbook stream; a sheet whose declared
+                   position lies outside the stream yields an empty sheet.
   example_test.go  Example renamed to match the method it documents.
+  xls_test.go      Calls Open without the removed charset parameter.
   README.md        Rewritten to describe this fork; upstream's text retained
                    verbatim under "Upstream README".
 
@@ -33,10 +39,14 @@ Added:
   go.mod, go.sum                  Module declaration at the fork's path.
   numfmt.go                       Number-format classification and
                                   percent rendering.
+  container.go                    Compound-file container reader.
   col_test.go, numfmt_test.go,
-  numberformat_test.go            Tests for the above.
+  numberformat_test.go,
+  container_test.go,
+  workbook_test.go                Tests for the above.
   testdata/numberformat.xls       Synthetic fixture; every value in it is
   testdata/gen_numberformat.py    invented, and its generator is committed
                                   alongside it.
+  .github/workflows/ci.yml        Continuous integration.
 
 No upstream file has been removed.

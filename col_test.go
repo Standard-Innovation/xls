@@ -153,8 +153,12 @@ func TestXfRkString(t *testing.T) {
 		{"user percent int x100", 169, "0.0%", true, rkIntX100(85), "85.0%"},
 		// A FORMAT record that redefines a built-in percent index decides.
 		{"redefined builtin percent", 10, "0.0%", true, rkIntX100(99), "99.0%"},
-		// A value its percent format does not render keeps the bare value.
-		{"user percent negative section", 173, "0.0%;(0.0%)", true, rkIntX100(-5), "-0.05"},
+		// A negative section renders a negative value.
+		{"user percent negative section", 173, "0.0%;-0.0%", true, rkIntX100(-5), "-5.0%"},
+		// A percent format this package cannot reproduce keeps the bare value.
+		{"user percent not reproduced", 174, "0.0%;(0.0%)", true, rkIntX100(-5), "-0.05"},
+		// An infinity has no percentage to print and keeps the bare value.
+		{"builtin percent infinity", 9, "", false, rkFloat(math.Inf(1)), "+Inf"},
 		// The built-in date range keeps its own lossy rendering, unchanged.
 		{"builtin date int", 14, "", false, rkInt(45306), "2024.01"},
 	}
@@ -225,7 +229,9 @@ func TestNumberColString(t *testing.T) {
 		{"user percent", 170, "0.0%", true, 0.333333, "33.3%"},
 		{"user numeric", 171, "0.00", true, 0.333333, "0.333333"},
 		{"user index without format record", 172, "", false, 0.333333, "0.333333"},
-		{"user percent negative section", 173, "0.0%;(0.0%)", true, -0.05, "-0.05"},
+		{"user percent negative section", 173, "0.0%;-0.0%", true, -0.05, "-5.0%"},
+		{"user percent not reproduced", 174, "0.0%;(0.0%)", true, -0.05, "-0.05"},
+		{"builtin percent NaN", 9, "", false, math.NaN(), "NaN"},
 		{"builtin general", 0, "", false, 0.9999000000099991, "0.9999000000099991"},
 	}
 	for _, tc := range tests {
