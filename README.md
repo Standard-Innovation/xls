@@ -6,8 +6,8 @@ A maintained fork of [extrame/xls](https://github.com/extrame/xls) at tag
 — re-moduled as `github.com/Standard-Innovation/xls` and carrying number-format
 fixes. Apache-2.0, as upstream: see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-This is not original work. Every file outside `numfmt.go`, one block of
-`col.go`, and the tests is upstream's, unmodified — including `LICENSE`, which
+This is not original work. Every file outside `numfmt.go`, the parts of
+`col.go` that `NOTICE` lists, and the tests is upstream's, unmodified — including `LICENSE`, which
 is upstream's verbatim. `NOTICE` lists exactly which files differ from
 `v0.0.1`.
 
@@ -25,7 +25,7 @@ index but never its format string. The rendering has to be fixed in the reader.
 
 Two defects are fixed here, and they have to be fixed together: correcting only
 the first turns a numeric cell that rendered as a timestamp into one that
-renders 100x too large.
+renders 100x too large. A third change renders percent formats.
 
 1. `XfRk.String` rendered *every* RK cell carrying a user-defined number format
    (index >= 164, with a FORMAT record) as an RFC3339 timestamp, whatever the
@@ -49,11 +49,21 @@ renders 100x too large.
    two decimals that fits 30 bits, which covers most two-decimal values.
    Upstream's master branch carries an equivalent fix.
 
-Not fixed here: `NumberCol.String` still ignores number formats entirely, so a
-NUMBER-encoded cell renders as its full stored precision rather than as
-printed. Rendering numbers per their format string needs the whole numeric
-format grammar and changes the output of every formatted numeric cell, so it is
-deliberately separate work.
+3. Percent-formatted cells rendered as their bare stored fraction, so a cell
+   Excel prints as `80.00%` read `0.8`, and a caller could not tell a share
+   from a share x 100. A cell whose format is a percent format, the built-in
+   `0%` (9) or `0.00%` (10) or any FORMAT record with a `%` in its first
+   section, now renders as Excel prints it: scaled by 100, rounded half away
+   from zero, optional decimals (`#`, `?`) trimmed, thousands grouped, with
+   `%`. This applies to RK, MULRK and NUMBER cells. A FORMAT record for an
+   index decides over the built-in percent indices.
+
+Not fixed here: apart from percent formats, `NumberCol.String` still ignores
+number formats, so a NUMBER-encoded cell renders as its full stored precision
+rather than as printed, and NUMBER cells do not take the date path that RK
+cells do. FORMULA cells still render as `FormulaCol`. Rendering numbers per
+their format string needs the whole numeric format grammar and changes the
+output of every formatted numeric cell, so it is deliberately separate work.
 
 ## Known limitation of the format classification
 
@@ -65,6 +75,19 @@ as its serial number rather than as a date. `v0.0.1` rendered it as a date by
 rendering *everything* as a date, which is the defect being fixed here. The
 failure mode is a visibly wrong cell rather than a silently wrong value, and
 covering it properly means a per-locale code table, so it is left open.
+
+## Known limitations of percent rendering
+
+- Only the first format section is read, as in `isDateFormat`. A format with a
+  negative section such as `0.00%;(0.00%)` renders -0.05 as `-5.00%`, where
+  Excel prints `(5.00%)`.
+- `?` is treated as an optional digit and trimmed. Excel prints a space in its
+  place to align decimals.
+- A percent format with an exponent (`0.00E+00%`), a `,` that scales by 1000,
+  or more than one `%` is not rendered: the cell keeps its bare stored value
+  rather than a rendering that differs from Excel's.
+- A negative value that rounds to zero keeps its sign, so -0.00001 under
+  `0.00%` renders as `-0.00%`.
 
 ## Known issues inherited from upstream
 

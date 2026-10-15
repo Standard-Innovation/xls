@@ -142,12 +142,17 @@ func TestXfRkString(t *testing.T) {
 		// present but empty is a distinct branch and lands the same way.
 		{"user index without format record", 167, "", false, rkIntX100(999925), "9999.25"},
 		{"user empty format record", 168, "", true, rkIntX100(999925), "9999.25"},
-		// Built-in formats are not classified at all; they render as numbers
-		// except in the built-in date range.
+		// Built-in formats render as numbers, except the built-in percent
+		// formats (9, 10) and the built-in date range.
+		{"builtin percent no decimals", 9, "", false, rkIntX100(50), "50%"},
 		{"builtin percent int x100", 10, "", false, rkIntX100(99), "99.00%"},
 		{"builtin percent int x100 negative", 10, "", false, rkIntX100(-99), "-99.00%"},
 		{"builtin general int", 0, "", false, rkInt(9999011), "9999011"},
 		{"builtin two-decimal int x100", 2, "", false, rkIntX100(999925), "9999.25"},
+		// A user-defined percent format renders with its own decimals.
+		{"user percent int x100", 169, "0.0%", true, rkIntX100(85), "85.0%"},
+		// A FORMAT record that redefines a built-in percent index decides.
+		{"redefined builtin percent", 10, "0.0%", true, rkIntX100(99), "99.0%"},
 		// The built-in date range keeps its own lossy rendering, unchanged.
 		{"builtin date int", 14, "", false, rkInt(45306), "2024.01"},
 	}
@@ -198,5 +203,63 @@ func TestRKFloat(t *testing.T) {
 				t.Errorf("Float() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// NUMBER cells applied no format before percent formats were rendered, so the
+// percent path is the whole of their formatted behaviour; every other format
+// keeps the full stored precision.
+func TestNumberColString(t *testing.T) {
+	tests := []struct {
+		name            string
+		formatNo        uint16
+		formatStr       string
+		hasFormatRecord bool
+		v               float64
+		want            string
+	}{
+		{"builtin percent no decimals", 9, "", false, 0.5, "50%"},
+		{"builtin percent two decimals", 10, "", false, 0.1875, "18.75%"},
+		{"user percent", 170, "0.0%", true, 0.333333, "33.3%"},
+		{"user numeric", 171, "0.00", true, 0.333333, "0.333333"},
+		{"user index without format record", 172, "", false, 0.333333, "0.333333"},
+		{"builtin general", 0, "", false, 0.9999000000099991, "0.9999000000099991"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wb := formatWorkBook(tc.formatNo, tc.formatStr, tc.hasFormatRecord)
+			c := &NumberCol{Index: 0, Float: tc.v}
+			if got := c.String(wb); len(got) != 1 || got[0] != tc.want {
+				t.Errorf("NumberCol.String() = %q, want [%q]", got, tc.want)
+			}
+		})
+	}
+}
+
+// An XF index past the end of the workbook's XF table must not panic; the
+// NUMBER value renders unformatted.
+func TestNumberColStringOutOfRangeXf(t *testing.T) {
+	wb := &WorkBook{Formats: map[uint16]*Format{}}
+	c := &NumberCol{Index: 7, Float: 0.5}
+	if got := c.String(wb); len(got) != 1 || got[0] != "0.5" {
+		t.Errorf("NumberCol.String() = %q, want [%q]", got, "0.5")
+	}
+}
+
+// A MULRK record carries one XF per cell, so a percent cell and a plain cell
+// in the same record each render under their own format.
+func TestMulrkColPercent(t *testing.T) {
+	wb := &WorkBook{
+		Xfs:     []st_xf_data{&Xf8{Format: 10}, &Xf8{Format: 0}},
+		Formats: map[uint16]*Format{},
+	}
+	c := &MulrkCol{Xfrks: []XfRk{
+		{Index: 0, Rk: rkIntX100(85)},
+		{Index: 1, Rk: rkIntX100(85)},
+	}}
+	got := c.String(wb)
+	want := []string{"85.00%", "0.85"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("MulrkCol.String() = %q, want %q", got, want)
 	}
 }

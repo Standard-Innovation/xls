@@ -20,7 +20,9 @@ Modified:
   col.go           XfRk.String consults the cell's number format instead of
                    rendering every user-formatted RK cell as a timestamp;
                    RK.number uses an arithmetic shift and honours the fX100
-                   flag on the integer variant.
+                   flag on the integer variant; RK.value added; XfRk.String
+                   and NumberCol.String render percent-formatted numbers
+                   scaled by 100 with "%".
   example_test.go  Example renamed to match the method it documents.
   README.md        Rewritten to describe this fork; upstream's text retained
                    verbatim under "Upstream README".
@@ -29,7 +31,8 @@ Added:
 
   NOTICE
   go.mod, go.sum                  Module declaration at the fork's path.
-  numfmt.go                       Number-format classification.
+  numfmt.go                       Number-format classification and
+                                  percent rendering.
   col_test.go, numfmt_test.go,
   numberformat_test.go            Tests for the above.
   testdata/numberformat.xls       Synthetic fixture; every value in it is

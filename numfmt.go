@@ -1,6 +1,7 @@
 package xls
 
 import (
+	"math/big"
 	"strconv"
 	"strings"
 )
@@ -63,18 +64,34 @@ func isElapsedTimeCode(group string) bool {
 	return false
 }
 
-// percentDecimals reports whether an Excel number-format string renders its
-// value as a percentage, and if so how many decimal places it prints.
+// percentFormat is how a percent number format prints its value: the decimals
+// it always prints ('0' placeholders), the decimals it may print (every digit
+// placeholder), and whether it groups thousands.
+type percentFormat struct {
+	minDecimals int
+	maxDecimals int
+	grouped     bool
+}
+
+// parsePercentFormat reports whether an Excel number-format string renders its
+// value as a percentage, and how.
 //
-// Like isDateFormat it classifies the first section only and consumes quoted
+// Like isDateFormat it classifies the first section only, and consumes quoted
 // literals, escapes, padding, fill and bracketed groups as it meets them, so a
 // "%" inside any of those is text, not the percent operator.
-func percentDecimals(s string) (decimals int, ok bool) {
-	inFraction := false
+//
+// A percent format this renderer cannot print as Excel does is reported as not
+// a percent format, so its cell keeps the bare stored value rather than a
+// wrong rendering: an exponent, a "," that scales by 1000 rather than grouping
+// thousands, or more than one "%".
+func parsePercentFormat(s string) (percentFormat, bool) {
+	var pf percentFormat
+	percents := 0
+	inFraction, intDigit, pendingComma := false, false, false
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
 		case ';':
-			return decimals, ok
+			return pf, percents == 1 && !pendingComma
 		case '"':
 			for i++; i < len(s) && s[i] != '"'; i++ {
 			}
@@ -83,49 +100,133 @@ func percentDecimals(s string) (decimals int, ok bool) {
 		case '[':
 			end := strings.IndexByte(s[i:], ']')
 			if end < 0 {
-				return decimals, ok
+				return pf, false
 			}
 			i += end
-		case '@':
-			return 0, false
-		case '.':
-			inFraction = true
+		case '@', 'E', 'e':
+			return pf, false
 		case '0', '#', '?':
 			if inFraction {
-				decimals++
+				pf.maxDecimals++
+				if s[i] == '0' {
+					pf.minDecimals++
+				}
+				continue
 			}
+			if pendingComma {
+				pf.grouped = true
+				pendingComma = false
+			}
+			intDigit = true
+		case ',':
+			if !inFraction && intDigit {
+				pendingComma = true
+			}
+		case '.':
+			if pendingComma {
+				return pf, false
+			}
+			inFraction = true
 		case '%':
-			ok = true
+			if pendingComma {
+				return pf, false
+			}
+			percents++
 		}
 	}
-	return decimals, ok
+	return pf, percents == 1 && !pendingComma
 }
 
-// builtinPercentDecimals maps the built-in percent formats (0% and 0.00%) to
-// the decimals they print.
-var builtinPercentDecimals = map[uint16]int{9: 0, 10: 2}
+// builtinPercentFormats are the built-in percent formats: 9 is "0%" and 10 is
+// "0.00%".
+var builtinPercentFormats = map[uint16]percentFormat{
+	9:  {},
+	10: {minDecimals: 2, maxDecimals: 2},
+}
 
-// percentFormat reports whether the cell style at xfIndex renders its number as
-// a percentage, and with how many decimals.
-func (wb *WorkBook) percentFormat(xfIndex uint16) (int, bool) {
+// percentFormatOf classifies a cell's number format as a percent format. A
+// FORMAT record, when the workbook has one for the index, decides; otherwise
+// only the built-in percent indices do.
+func percentFormatOf(formatNo uint16, f *Format) (percentFormat, bool) {
+	if f != nil {
+		return parsePercentFormat(f.str)
+	}
+	pf, ok := builtinPercentFormats[formatNo]
+	return pf, ok
+}
+
+// render prints a stored fraction as Excel does under this format: scaled by
+// 100, rounded half away from zero to maxDecimals, trailing zeros trimmed down
+// to minDecimals, thousands grouped if the format groups them, then "%".
+//
+// The scaled value is first cut to 15 significant digits, Excel's display
+// precision, so a product such as 0.145*100 = 14.499999999999998 rounds as the
+// 14.5 it stands for. Rounding is then done in exact decimal arithmetic, which
+// strconv's half-to-even float rounding is not.
+func (pf percentFormat) render(v float64) string {
+	r, ok := new(big.Rat).SetString(strconv.FormatFloat(v*100, 'g', 15, 64))
+	if !ok {
+		// NaN and the infinities have no percentage to print.
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	negative := r.Sign() < 0
+	r.Abs(r)
+
+	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(pf.maxDecimals)), nil)
+	r.Mul(r, new(big.Rat).SetInt(scale))
+	r.Add(r, big.NewRat(1, 2))
+	digits := new(big.Int).Quo(r.Num(), r.Denom()).String()
+
+	if len(digits) <= pf.maxDecimals {
+		digits = strings.Repeat("0", pf.maxDecimals-len(digits)+1) + digits
+	}
+	intPart, frac := digits[:len(digits)-pf.maxDecimals], digits[len(digits)-pf.maxDecimals:]
+	for len(frac) > pf.minDecimals && frac[len(frac)-1] == '0' {
+		frac = frac[:len(frac)-1]
+	}
+	if pf.grouped {
+		intPart = groupThousands(intPart)
+	}
+
+	var b strings.Builder
+	if negative {
+		b.WriteByte('-')
+	}
+	b.WriteString(intPart)
+	if frac != "" {
+		b.WriteByte('.')
+		b.WriteString(frac)
+	}
+	b.WriteByte('%')
+	return b.String()
+}
+
+// groupThousands inserts a "," every three digits from the right.
+func groupThousands(digits string) string {
+	if len(digits) <= 3 {
+		return digits
+	}
+	head := len(digits) % 3
+	if head == 0 {
+		head = 3
+	}
+	var b strings.Builder
+	b.WriteString(digits[:head])
+	for i := head; i < len(digits); i += 3 {
+		b.WriteByte(',')
+		b.WriteString(digits[i : i+3])
+	}
+	return b.String()
+}
+
+// cellFormat resolves the cell style at xfIndex to its number-format index and,
+// if the workbook carries one, that index's FORMAT record. ok is false for an
+// XF index past the end of the workbook's XF table.
+func (wb *WorkBook) cellFormat(xfIndex uint16) (formatNo uint16, f *Format, ok bool) {
 	idx := int(xfIndex)
 	if idx >= len(wb.Xfs) {
-		return 0, false
+		return 0, nil, false
 	}
-	fNo := wb.Xfs[idx].formatNo()
-	if d, ok := builtinPercentDecimals[fNo]; ok {
-		return d, true
-	}
-	if fNo >= 164 {
-		if f := wb.Formats[fNo]; f != nil {
-			return percentDecimals(f.str)
-		}
-	}
-	return 0, false
-}
-
-// formatPercent renders a stored fraction the way Excel prints it under a
-// percent format: scaled by 100, rounded to the format's decimals, with "%".
-func formatPercent(v float64, decimals int) string {
-	return strconv.FormatFloat(v*100, 'f', decimals, 64) + "%"
+	formatNo = wb.Xfs[idx].formatNo()
+	return formatNo, wb.Formats[formatNo], true
 }
