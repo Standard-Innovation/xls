@@ -1,6 +1,9 @@
 package xls
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // isDateFormat reports whether an Excel number-format string renders its value
 // as a date or a time rather than as a number or as text.
@@ -58,4 +61,71 @@ func isElapsedTimeCode(group string) bool {
 		return true
 	}
 	return false
+}
+
+// percentDecimals reports whether an Excel number-format string renders its
+// value as a percentage, and if so how many decimal places it prints.
+//
+// Like isDateFormat it classifies the first section only and consumes quoted
+// literals, escapes, padding, fill and bracketed groups as it meets them, so a
+// "%" inside any of those is text, not the percent operator.
+func percentDecimals(s string) (decimals int, ok bool) {
+	inFraction := false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case ';':
+			return decimals, ok
+		case '"':
+			for i++; i < len(s) && s[i] != '"'; i++ {
+			}
+		case '\\', '_', '*':
+			i++
+		case '[':
+			end := strings.IndexByte(s[i:], ']')
+			if end < 0 {
+				return decimals, ok
+			}
+			i += end
+		case '@':
+			return 0, false
+		case '.':
+			inFraction = true
+		case '0', '#', '?':
+			if inFraction {
+				decimals++
+			}
+		case '%':
+			ok = true
+		}
+	}
+	return decimals, ok
+}
+
+// builtinPercentDecimals maps the built-in percent formats (0% and 0.00%) to
+// the decimals they print.
+var builtinPercentDecimals = map[uint16]int{9: 0, 10: 2}
+
+// percentFormat reports whether the cell style at xfIndex renders its number as
+// a percentage, and with how many decimals.
+func (wb *WorkBook) percentFormat(xfIndex uint16) (int, bool) {
+	idx := int(xfIndex)
+	if idx >= len(wb.Xfs) {
+		return 0, false
+	}
+	fNo := wb.Xfs[idx].formatNo()
+	if d, ok := builtinPercentDecimals[fNo]; ok {
+		return d, true
+	}
+	if fNo >= 164 {
+		if f := wb.Formats[fNo]; f != nil {
+			return percentDecimals(f.str)
+		}
+	}
+	return 0, false
+}
+
+// formatPercent renders a stored fraction the way Excel prints it under a
+// percent format: scaled by 100, rounded to the format's decimals, with "%".
+func formatPercent(v float64, decimals int) string {
+	return strconv.FormatFloat(v*100, 'f', decimals, 64) + "%"
 }

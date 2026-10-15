@@ -95,3 +95,52 @@ func TestIsElapsedTimeCode(t *testing.T) {
 		}
 	}
 }
+
+// A "%" is the percent operator only outside literals, escapes and bracketed
+// groups, and only in the first (positive) section; the decimals are the digit
+// placeholders after the decimal point.
+func TestPercentDecimals(t *testing.T) {
+	tests := []struct {
+		format   string
+		decimals int
+		ok       bool
+	}{
+		{"0%", 0, true},
+		{"0.00%", 2, true},
+		{"0.0###%", 4, true},
+		{"#,##0.00%;[Red]-#,##0.00%", 2, true},
+		{"[$-409]0.00%", 2, true},
+		{"0.00", 0, false},
+		{`0.00"%"`, 2, false},
+		{`0.00\%`, 2, false},
+		{"General", 0, false},
+		{"@", 0, false},
+		{`0.00;"%"`, 2, false},
+	}
+	for _, tt := range tests {
+		d, ok := percentDecimals(tt.format)
+		if ok != tt.ok || (ok && d != tt.decimals) {
+			t.Errorf("percentDecimals(%q) = (%d, %v), want (%d, %v)", tt.format, d, ok, tt.decimals, tt.ok)
+		}
+	}
+}
+
+func TestFormatPercent(t *testing.T) {
+	tests := []struct {
+		v        float64
+		decimals int
+		want     string
+	}{
+		{0.8, 2, "80.00%"},
+		{0.5, 0, "50%"},
+		{0.1875, 2, "18.75%"},
+		{1.0 / 3, 2, "33.33%"},
+		{-0.99, 2, "-99.00%"},
+		{0, 2, "0.00%"},
+	}
+	for _, tt := range tests {
+		if got := formatPercent(tt.v, tt.decimals); got != tt.want {
+			t.Errorf("formatPercent(%v, %d) = %q, want %q", tt.v, tt.decimals, got, tt.want)
+		}
+	}
+}

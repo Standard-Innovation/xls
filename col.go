@@ -45,6 +45,13 @@ type XfRk struct {
 }
 
 func (xf *XfRk) String(wb *WorkBook) string {
+	if d, ok := wb.percentFormat(xf.Index); ok {
+		i, f, isFloat := xf.Rk.number()
+		if !isFloat {
+			f = float64(i)
+		}
+		return formatPercent(f, d)
+	}
 	idx := int(xf.Index)
 	if len(wb.Xfs) > idx {
 		fNo := wb.Xfs[idx].formatNo()
@@ -165,6 +172,9 @@ type NumberCol struct {
 }
 
 func (c *NumberCol) String(wb *WorkBook) []string {
+	if d, ok := wb.percentFormat(c.Index); ok {
+		return []string{formatPercent(c.Float, d)}
+	}
 	return []string{strconv.FormatFloat(c.Float, 'f', -1, 64)}
 }
 

@@ -25,8 +25,8 @@ func TestNumberFormatFixture(t *testing.T) {
 		// Built-in formats carry no FORMAT record, so these two never
 		// rendered as timestamps. They were simply decoded wrong: 0.99 read
 		// as 99, and -0.99 as 1073741725.
-		{"rk_int_x100_builtin_percent", "0.99"},
-		{"rk_int_x100_negative_builtin_percent", "-0.99"},
+		{"rk_int_x100_builtin_percent", "99.00%"},
+		{"rk_int_x100_negative_builtin_percent", "-99.00%"},
 		// A date under a user-defined date format still renders as an ISO
 		// timestamp, unchanged. Callers read .xls dates in this form.
 		{"rk_int_date", "2024-01-15T00:00:00Z"},

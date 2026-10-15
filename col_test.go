@@ -144,8 +144,8 @@ func TestXfRkString(t *testing.T) {
 		{"user empty format record", 168, "", true, rkIntX100(999925), "9999.25"},
 		// Built-in formats are not classified at all; they render as numbers
 		// except in the built-in date range.
-		{"builtin percent int x100", 10, "", false, rkIntX100(99), "0.99"},
-		{"builtin percent int x100 negative", 10, "", false, rkIntX100(-99), "-0.99"},
+		{"builtin percent int x100", 10, "", false, rkIntX100(99), "99.00%"},
+		{"builtin percent int x100 negative", 10, "", false, rkIntX100(-99), "-99.00%"},
 		{"builtin general int", 0, "", false, rkInt(9999011), "9999011"},
 		{"builtin two-decimal int x100", 2, "", false, rkIntX100(999925), "9999.25"},
 		// The built-in date range keeps its own lossy rendering, unchanged.
