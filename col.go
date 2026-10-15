@@ -45,19 +45,19 @@ type XfRk struct {
 }
 
 func (xf *XfRk) String(wb *WorkBook) string {
-	idx := int(xf.Index)
-	if len(wb.Xfs) > idx {
-		fNo := wb.Xfs[idx].formatNo()
+	if fNo, f, ok := wb.cellFormat(xf.Index); ok {
+		if pf, ok := percentFormatOf(fNo, f); ok {
+			if s, ok := pf.render(xf.Rk.value()); ok {
+				return s
+			}
+			return xf.Rk.String()
+		}
 		if fNo >= 164 { // user defined format
-			if fmt := wb.Formats[fNo]; fmt != nil {
-				if !isDateFormat(fmt.str) {
+			if f != nil {
+				if !isDateFormat(f.str) {
 					return xf.Rk.String()
 				}
-				i, f, isFloat := xf.Rk.number()
-				if !isFloat {
-					f = float64(i)
-				}
-				t := timeFromExcelTime(f, wb.dateMode == 1)
+				t := timeFromExcelTime(xf.Rk.value(), wb.dateMode == 1)
 
 				// RFC3339 regardless of the format string, deliberately:
 				// callers read .xls dates in this one shape. Upstream's
@@ -69,11 +69,7 @@ func (xf *XfRk) String(wb *WorkBook) string {
 			}
 			// see http://www.openoffice.org/sc/excelfileformat.pdf
 		} else if 14 <= fNo && fNo <= 17 || fNo == 22 || 27 <= fNo && fNo <= 36 || 50 <= fNo && fNo <= 58 { // jp. date format
-			i, f, isFloat := xf.Rk.number()
-			if !isFloat {
-				f = float64(i)
-			}
-			t := timeFromExcelTime(f, wb.dateMode == 1)
+			t := timeFromExcelTime(xf.Rk.value(), wb.dateMode == 1)
 			return t.Format("2006.01") //TODO it should be international
 		}
 	}
@@ -105,6 +101,15 @@ func (rk RK) number() (intNum int64, floatNum float64, isFloat bool) {
 		return 0, float64(val) / 100, true
 	}
 	return int64(val), 0, false
+}
+
+// value returns the decoded number as a float64, whichever variant holds it.
+func (rk RK) value() float64 {
+	i, f, isFloat := rk.number()
+	if !isFloat {
+		return float64(i)
+	}
+	return f
 }
 
 func (rk RK) String() string {
@@ -165,6 +170,13 @@ type NumberCol struct {
 }
 
 func (c *NumberCol) String(wb *WorkBook) []string {
+	if fNo, f, ok := wb.cellFormat(c.Index); ok {
+		if pf, ok := percentFormatOf(fNo, f); ok {
+			if s, ok := pf.render(c.Float); ok {
+				return []string{s}
+			}
+		}
+	}
 	return []string{strconv.FormatFloat(c.Float, 'f', -1, 64)}
 }
 

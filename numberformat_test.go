@@ -18,15 +18,13 @@ func TestNumberFormatFixture(t *testing.T) {
 		{"rk_int_userfmt", "9999011"},
 		{"rk_int_x100_userfmt", "9999.25"},
 		{"rk_int_x100_negative_userfmt", "-9999.75"},
-		// A NUMBER record reaches no format lookup at all, so this one was
-		// never misrendered -- and is still not format-aware. Rendering
-		// numbers per their format string is a separate change.
+		// Under a format other than a percent format, a NUMBER record renders
+		// its full stored precision.
 		{"number_userfmt", "0.9999000000099991"},
-		// Built-in formats carry no FORMAT record, so these two never
-		// rendered as timestamps. They were simply decoded wrong: 0.99 read
-		// as 99, and -0.99 as 1073741725.
-		{"rk_int_x100_builtin_percent", "0.99"},
-		{"rk_int_x100_negative_builtin_percent", "-0.99"},
+		// Built-in formats carry no FORMAT record; these scaled integers
+		// render as the built-in 0.00% format prints them.
+		{"rk_int_x100_builtin_percent", "99.00%"},
+		{"rk_int_x100_negative_builtin_percent", "-99.00%"},
 		// A date under a user-defined date format still renders as an ISO
 		// timestamp, unchanged. Callers read .xls dates in this form.
 		{"rk_int_date", "2024-01-15T00:00:00Z"},

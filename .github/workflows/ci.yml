@@ -52,7 +52,7 @@ jobs:
       # though this fork rewrites most of xls.go's body.
       - name: gofmt (files this fork owns)
         run: |
-          unformatted="$(gofmt -l container.go container_test.go workbook_test.go)"
+          unformatted="$(gofmt -l container.go container_test.go workbook_test.go numfmt.go numfmt_test.go col_test.go numberformat_test.go)"
           if [ -n "$unformatted" ]; then
             echo "gofmt needed for: $unformatted"
             exit 1
